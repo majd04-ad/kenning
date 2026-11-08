@@ -37,6 +37,7 @@ add_library(kenning-engine STATIC
     src/pipeline.cpp src/pipeline.h
     src/service.h
     src/signedin.h
+    src/turnqueue.h
 )
 target_link_libraries(kenning-engine PUBLIC ${OpenCV_LIBS} Qt6::Core kenning-config)
 target_include_directories(kenning-engine PUBLIC ${OpenCV_INCLUDE_DIRS})

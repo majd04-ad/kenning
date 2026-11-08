@@ -9,20 +9,22 @@
 #include "failurelimiter.h"
 #include "service.h"
 #include "signedin.h"
+#include "turnqueue.h"
 
-#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
+#include <mutex>
 #include <poll.h>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <systemd/sd-login.h>
-#include <vector>
+#include <thread>
 
 namespace FaceUnlock
 {
@@ -30,14 +32,15 @@ namespace
 {
 // Socket activated: exits after this long without a request.
 constexpr int idleExitMs = 5 * 60 * 1000;
-// A request must arrive whole within this time, however slowly it trickles in. Requests
-// are read side by side, so a slow client only holds up itself.
+// A request must arrive whole within this time, however slowly it trickles in. Each
+// connection has a thread, so a slow client only holds up itself.
 constexpr auto requestDeadline = std::chrono::seconds(2);
 constexpr int replyTimeoutSeconds = 2;
 constexpr std::size_t maxRequestLength = 255;
-// Connections still sending their request: per user, and in all.
-constexpr std::size_t maxPendingPerUser = 4;
-constexpr std::size_t maxPending = 64;
+// Each connection has a thread; more than this at once are turned away.
+constexpr int maxConnections = 32;
+// Connections of one user still sending their request, so a slow sender can't take them all.
+constexpr std::size_t maxArrivingPerUser = 4;
 // In /run like pam_faillock's records: kept across service restarts, cleared at reboot.
 constexpr const char *failuresPath = "/run/kenning/failures";
 constexpr const char *signedInPath = "/run/kenning/signed-in";
@@ -101,107 +104,62 @@ int ownSocket()
 
 using Clock = std::chrono::steady_clock;
 
-struct PendingClient {
-    int fd = -1;
-    ucred peer{};
-    Clock::time_point deadline;
-    std::string buffer;
-    bool complete = false; // a newline arrived
-    bool done = false; // complete, hung up, or out of room
-};
+// The request line, which must arrive whole before the deadline however slowly it trickles in.
+std::optional<Request> receiveRequest(int client, Clock::time_point deadline)
+{
+    char buffer[maxRequestLength] = {};
+    std::size_t received = 0;
+    while (received < maxRequestLength && !std::memchr(buffer, '\n', received)) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+        if (left <= 0) {
+            return std::nullopt;
+        }
+        pollfd state{client, POLLIN, 0};
+        const int ready = poll(&state, 1, int(left));
+        if (ready < 0 && errno == EINTR) {
+            continue;
+        }
+        if (ready <= 0) {
+            return std::nullopt;
+        }
+        const ssize_t count = recv(client, buffer + received, maxRequestLength - received, MSG_DONTWAIT);
+        if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+            continue;
+        }
+        if (count <= 0) {
+            return std::nullopt;
+        }
+        received += std::size_t(count);
+    }
+    return parseRequest(std::string_view(buffer, received));
+}
 
-// Connections whose request hasn't fully arrived, read without blocking.
-class PendingClients
+// Connections still sending their request, per user.
+class Arrivals
 {
 public:
-    const std::vector<PendingClient> &clients() const
+    bool enter(uid_t uid)
     {
-        return m_clients;
+        const std::lock_guard lock(m_mutex);
+        std::size_t &count = m_counts[uid];
+        if (count >= maxArrivingPerUser) {
+            return false;
+        }
+        ++count;
+        return true;
     }
 
-    void accept(int listener, Clock::time_point now)
+    void leave(uid_t uid)
     {
-        const int fd = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK);
-        if (fd < 0) {
-            return;
+        const std::lock_guard lock(m_mutex);
+        if (--m_counts[uid] == 0) {
+            m_counts.erase(uid);
         }
-        PendingClient client{.fd = fd, .peer = {}, .deadline = now + requestDeadline, .buffer = {}};
-        socklen_t peerSize = sizeof(client.peer);
-        if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &client.peer, &peerSize) != 0 || m_clients.size() >= maxPending
-            || pendingFrom(client.peer.uid) >= maxPendingPerUser) {
-            close(fd);
-            return;
-        }
-        m_clients.push_back(std::move(client));
-    }
-
-    void read(int fd)
-    {
-        const auto found = std::find_if(m_clients.begin(), m_clients.end(), [fd](const PendingClient &client) {
-            return client.fd == fd;
-        });
-        if (found == m_clients.end() || found->done) {
-            return;
-        }
-        char chunk[maxRequestLength];
-        for (;;) {
-            const std::size_t room = maxRequestLength - found->buffer.size();
-            const ssize_t count = recv(fd, chunk, room, 0);
-            if (count < 0 && errno == EINTR) {
-                continue;
-            }
-            if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                return;
-            }
-            if (count <= 0) {
-                found->done = true;
-                return;
-            }
-            found->buffer.append(chunk, std::size_t(count));
-            if (found->buffer.find('\n') != std::string::npos) {
-                found->complete = found->done = true;
-                return;
-            }
-            if (found->buffer.size() >= maxRequestLength) {
-                found->done = true;
-                return;
-            }
-        }
-    }
-
-    // Removes and returns the clients to answer now, made blocking again.
-    std::vector<PendingClient> takeFinished(Clock::time_point now)
-    {
-        std::vector<PendingClient> finished;
-        std::erase_if(m_clients, [&](PendingClient &client) {
-            if (!client.done && now < client.deadline) {
-                return false;
-            }
-            fcntl(client.fd, F_SETFL, fcntl(client.fd, F_GETFL) & ~O_NONBLOCK);
-            finished.push_back(std::move(client));
-            return true;
-        });
-        return finished;
-    }
-
-    int millisecondsUntilNextDeadline(Clock::time_point now) const
-    {
-        auto next = m_clients.front().deadline;
-        for (const PendingClient &client : m_clients) {
-            next = std::min(next, client.deadline);
-        }
-        return int(std::max<long long>(0, std::chrono::duration_cast<std::chrono::milliseconds>(next - now).count() + 1));
     }
 
 private:
-    std::size_t pendingFrom(uid_t uid) const
-    {
-        return std::size_t(std::count_if(m_clients.cbegin(), m_clients.cend(), [uid](const PendingClient &client) {
-            return client.peer.uid == uid;
-        }));
-    }
-
-    std::vector<PendingClient> m_clients;
+    std::mutex m_mutex;
+    std::map<uid_t, std::size_t> m_counts;
 };
 
 class Service
@@ -214,7 +172,7 @@ public:
         m_signedIn.restore(std::string(std::istreambuf_iterator<char>(file), {}));
     }
 
-    // client is blocking again, with the request read in full.
+    // The request has been read, or ran out of time.
     void serve(int client, const ucred &peer, const std::optional<Request> &request)
     {
         const timeval timeout{replyTimeoutSeconds, 0};
@@ -258,12 +216,14 @@ public:
     bool canExit()
     {
         // Exiting would forget failed attempts and lockouts.
+        const std::lock_guard lock(m_state);
         return m_failures.isEmpty(FailureLimiter::Clock::now());
     }
 
 private:
     bool signedInSinceBoot(uid_t uid)
     {
+        const std::lock_guard lock(m_state);
         if (m_signedIn.contains(uid)) {
             return true;
         }
@@ -283,6 +243,7 @@ private:
         if (!std::filesystem::exists(modelPath(user))) {
             return NoModel;
         }
+        const std::lock_guard lock(m_state);
         return m_failures.isLockedOut(uid, FailureLimits::fromConfig(Config()), FailureLimiter::Clock::now()) ? LockedOut : Recognized;
     }
 
@@ -291,20 +252,32 @@ private:
         // Read per request so settings changes apply without a restart.
         const Config config;
         const FailureLimits limits = FailureLimits::fromConfig(config);
-        if (m_failures.isLockedOut(uid, limits, FailureLimiter::Clock::now())) {
+        if (isLockedOut(uid, limits)) {
             return LockedOut;
+        }
+        const auto hungUp = [client] {
+            return clientHungUp(client);
+        };
+        // One scan at a time; a user whose request is already waiting can't add another.
+        const std::optional<TurnQueue::Turn> turn = m_camera.take(uid, hungUp);
+        if (!turn) {
+            return Aborted;
         }
         // A broken install must answer "failed", so PAM falls back to the password.
         try {
-            const ScanResult result = compare(config, user, [client] {
-                return clientHungUp(client);
-            });
+            const ScanResult result = compare(config, user, hungUp);
             recordResult(user, uid, result, limits);
             return result.code;
         } catch (const std::exception &error) {
             std::cerr << "kenning daemon: scan failed: " << error.what() << '\n';
             return Error;
         }
+    }
+
+    bool isLockedOut(uid_t uid, const FailureLimits &limits)
+    {
+        const std::lock_guard lock(m_state);
+        return m_failures.isLockedOut(uid, limits, FailureLimiter::Clock::now());
     }
 
     void restoreFailures()
@@ -323,6 +296,7 @@ private:
     void recordResult(const std::string &user, uid_t uid, const ScanResult &result, const FailureLimits &limits)
     {
         if (result.code == Recognized) {
+            const std::lock_guard lock(m_state);
             m_failures.recordSuccess(uid);
             saveFailures();
             return;
@@ -336,6 +310,7 @@ private:
 
     void recordFailure(const std::string &user, uid_t uid, FailureLimiter::Kind kind, const FailureLimits &limits)
     {
+        const std::lock_guard lock(m_state);
         if (m_failures.recordFailure(uid, kind, limits, FailureLimiter::Clock::now())) {
             std::cerr << "kenning daemon: face unlock locked for " << user << " for " << limits.lockout.count() << " minutes after " << limits.maxFailures
                       << " unrecognized faces and " << limits.maxPasswordFailures << " wrong passwords\n";
@@ -343,8 +318,11 @@ private:
         saveFailures();
     }
 
+    // Guards m_failures and m_signedIn: each connection is served in a thread of its own.
+    std::mutex m_state;
     FailureLimiter m_failures;
     SignedInUsers m_signedIn;
+    TurnQueue m_camera;
 };
 }
 
@@ -361,49 +339,49 @@ int runDaemon()
     }
 
     Service service;
-    PendingClients pending;
-    auto idleSince = Clock::now();
+    Arrivals arriving;
+    std::atomic<int> connections = 0;
     for (;;) {
-        std::vector<pollfd> waiting{{listener, POLLIN, 0}};
-        for (const PendingClient &client : pending.clients()) {
-            waiting.push_back({client.fd, POLLIN, 0});
+        pollfd waiting{listener, POLLIN, 0};
+        const int ready = poll(&waiting, 1, activated ? idleExitMs : -1);
+        if (ready == 0) {
+            if (connections == 0 && service.canExit()) {
+                return 0;
+            }
+            continue;
         }
-        int timeoutMs = -1;
-        if (!pending.clients().empty()) {
-            timeoutMs = pending.millisecondsUntilNextDeadline(Clock::now());
-        } else if (activated) {
-            timeoutMs = int(std::max<long long>(0, idleExitMs - std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - idleSince).count()));
-        }
-        const int ready = poll(waiting.data(), waiting.size(), timeoutMs);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
             }
             return Error;
         }
-        const auto now = Clock::now();
-        if (ready == 0 && pending.clients().empty()) {
-            if (service.canExit()) {
-                return 0;
-            }
-            idleSince = now;
+        const int client = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+        if (client < 0) {
             continue;
         }
-
-        for (std::size_t i = 1; i < waiting.size(); ++i) {
-            if (waiting[i].revents) {
-                pending.read(waiting[i].fd);
-            }
+        const auto deadline = Clock::now() + requestDeadline;
+        ucred peer{};
+        socklen_t peerSize = sizeof(peer);
+        if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peerSize) != 0 || !arriving.enter(peer.uid)) {
+            close(client);
+            continue;
         }
-        // Whole requests, then ones out of time (answered "aborted"), oldest first.
-        for (PendingClient &client : pending.takeFinished(now)) {
-            service.serve(client.fd, client.peer, client.complete ? parseRequest(client.buffer) : std::nullopt);
-            close(client.fd);
+        // A scan takes seconds; questions such as has-model must not wait for it.
+        if (++connections > maxConnections) {
+            --connections;
+            arriving.leave(peer.uid);
+            reply(client, Aborted);
+            close(client);
+            continue;
         }
-        if (waiting[0].revents & POLLIN) {
-            pending.accept(listener, now);
-        }
-        idleSince = Clock::now();
+        std::thread([&service, &arriving, &connections, client, peer, deadline] {
+            const std::optional<Request> request = receiveRequest(client, deadline);
+            arriving.leave(peer.uid);
+            service.serve(client, peer, request);
+            close(client);
+            --connections;
+        }).detach();
     }
 }
 }
