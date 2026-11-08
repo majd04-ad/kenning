@@ -28,4 +28,8 @@ bool saveModels(const std::string &user, const std::vector<FaceModel> &models);
 
 // Hands a file in the models directory to the service user (when run as root).
 bool giveToService(const std::string &path);
+
+// A label as Howdy keeps it: no commas or control characters, at most maxLabelLength bytes of
+// whole UTF-8 characters, "Model #<id>" when empty.
+std::string faceLabel(std::string label, int id);
 }

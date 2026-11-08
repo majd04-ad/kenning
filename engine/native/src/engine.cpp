@@ -214,10 +214,11 @@ std::string skippedMessage(const StepProgress &progress)
 class Enrolment
 {
 public:
-    Enrolment(Pipeline &pipeline, std::vector<cv::Mat> &encodings, const ProgressCallback &progress)
+    Enrolment(Pipeline &pipeline, std::vector<cv::Mat> &encodings, const ProgressCallback &progress, const std::function<bool()> &cancelled)
         : m_pipeline(pipeline)
         , m_encodings(encodings)
         , m_progress(progress)
+        , m_cancelled(cancelled)
     {
     }
 
@@ -228,6 +229,10 @@ public:
         const auto deadline = Clock::now() + budget.timeLimit;
         StepProgress progress;
         while (progress.captured < budget.wanted && Clock::now() < deadline && !outOfFrames(step)) {
+            if (m_cancelled && m_cancelled()) {
+                m_encodings.clear();
+                return ScanResult{.code = Aborted, .message = "Failure, cancelled"};
+            }
             cv::Mat image;
             const Pipeline::Frame frame = m_pipeline.read(image);
             if (frame == Pipeline::Frame::Missing || frame == Pipeline::Frame::Black) {
@@ -343,6 +348,7 @@ private:
     Pipeline &m_pipeline;
     std::vector<cv::Mat> &m_encodings;
     const ProgressCallback &m_progress;
+    const std::function<bool()> &m_cancelled;
     int m_litFrames = 0;
     int m_darkFrames = 0;
     int m_brightFrames = 0;
@@ -351,13 +357,13 @@ private:
 };
 }
 
-ScanResult enroll(const Config &config, std::vector<cv::Mat> &encodings, const ProgressCallback &progress)
+ScanResult enroll(const Config &config, std::vector<cv::Mat> &encodings, const ProgressCallback &progress, const std::function<bool()> &cancelled)
 {
     Pipeline pipeline(config);
     if (!pipeline.ready()) {
         return {.code = Error, .message = cameraFailure};
     }
-    Enrolment enrolment(pipeline, encodings, progress);
+    Enrolment enrolment(pipeline, encodings, progress, cancelled);
     for (const EnrolmentStep &step : enrolmentSteps) {
         if (step.kind != StepKind::LookStraight && encodings.empty()) {
             break;
