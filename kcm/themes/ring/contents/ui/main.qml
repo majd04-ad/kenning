@@ -62,7 +62,7 @@ Item {
                 height: width
                 radius: width / 2
                 color: root.accent
-                opacity: root.scanning ? 0.15 : (root.active ? 0.12 : 0)
+                opacity: root.scanning ? 0.15 : (root.faceState !== 0 ? 0.12 : 0)
 
                 SequentialAnimation on scale {
                     running: root.scanning
