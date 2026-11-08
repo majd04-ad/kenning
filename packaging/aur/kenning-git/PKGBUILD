@@ -68,7 +68,10 @@ package_kenning-git() {
 
   DESTDIR="$pkgdir" cmake --install kenning-build
   # Re-applies the lock screen add-on after plasma-desktop updates
-  install -Dm644 -t "$pkgdir/usr/share/libalpm/hooks" "$srcdir/kenning"/packaging/arch/*.hook
+  local hook
+  for hook in "$srcdir/kenning"/packaging/arch/*.hook; do
+    sed "s/^Target = kenning$/Target = kenning-git/" "$hook" | install -Dm644 /dev/stdin "$pkgdir/usr/share/libalpm/hooks/${hook##*/}"
+  done
 }
 
 package_plasma-login-manager-kenning-git() {
