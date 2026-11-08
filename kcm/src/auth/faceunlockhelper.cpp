@@ -6,6 +6,7 @@
 #include "camerafinder.h"
 #include "lockscreenstate.h"
 #include "paths.h"
+#include "service.h"
 #include "settingsschema.h"
 
 #include <KAuth/HelperSupport>
@@ -319,12 +320,33 @@ ActionReply FaceUnlockHelper::add(const QVariantMap &args)
         label = QStringLiteral("Face");
     }
     prepareEngine();
-    ActionReply reply =
-        runStreaming(FaceUnlock::engineBinary,
-                     {QStringLiteral("--plain"), QStringLiteral("-y"), QStringLiteral("-U"), callerName(), QStringLiteral("add"), QStringLiteral("--"), label});
-    if (!secureModels() && !reply.failed()) {
+    // The service captures the face in its sandbox; this helper never runs OpenCV as root.
+    constexpr int enrolmentLineTimeoutSeconds = 30;
+    QString output;
+    const FaceUnlock::Reply result = FaceUnlock::callService({
+        .command = "enroll",
+        .user = callerName().toStdString(),
+        .argument = label.toStdString(),
+        .idleTimeoutSeconds = enrolmentLineTimeoutSeconds,
+        .onMessage =
+            [&output](FaceUnlock::MessageKind, const std::string &text) {
+                const QString line = QString::fromStdString(text).trimmed();
+                output += line + QLatin1Char('\n');
+                if (!line.isEmpty()) {
+                    HelperSupport::progressStep(QVariantMap{{QStringLiteral("line"), line}});
+                }
+            },
+        .cancelled = HelperSupport::isStopped,
+    });
+    if (result.code < 0) {
+        output += QStringLiteral("The Kenning service isn't reachable\n");
+    }
+    if (!secureModels() && result.code == FaceUnlock::Recognized) {
         return failure(QStringLiteral("The face was saved, but the Kenning service can't be given access to it"));
     }
+    ActionReply reply = ActionReply::SuccessReply();
+    reply.addData(QStringLiteral("exitCode"), result.code);
+    reply.addData(QStringLiteral("output"), output);
     return reply;
 }
 

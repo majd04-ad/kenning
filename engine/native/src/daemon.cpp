@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -39,10 +40,23 @@ constexpr int maxConnections = 32;
 constexpr const char *failuresPath = "/run/kenning/failures";
 constexpr const char *signedInPath = "/run/kenning/signed-in";
 
+void sendLine(int client, const std::string &line)
+{
+    const std::string text = line + '\n';
+    send(client, text.data(), text.size(), MSG_NOSIGNAL);
+}
+
 void reply(int client, int code)
 {
-    const std::string text = std::to_string(code) + '\n';
-    send(client, text.data(), text.size(), MSG_NOSIGNAL);
+    sendLine(client, std::to_string(code));
+}
+
+// A progress line for the client to show (or to pass on as a PAM message).
+void say(int client, const std::string &text, MessageKind kind = MessageKind::Info)
+{
+    std::string line = text;
+    std::erase(line, '\n');
+    sendLine(client, (kind == MessageKind::Info ? "# " : "! ") + line);
 }
 
 std::optional<Request> receiveRequest(int client)
@@ -142,6 +156,10 @@ public:
         if (!account) {
             return reply(client, Aborted);
         }
+        // Set Up, through the settings helper or sudo kenning add: an administrator already agreed.
+        if (request->command == "enroll") {
+            return reply(client, peer.uid == 0 ? enrollFace(client, request->user, request->argument) : Aborted);
+        }
         const bool needsPassword = Config().boolean("core/password_after_boot", true) && !signedInSinceBoot(account->pw_uid);
         // Asked by the login screen so it can skip the face scan after a restart. Open to anyone:
         // who has signed in since boot is public already (last, loginctl).
@@ -224,6 +242,49 @@ private:
             std::cerr << "kenning daemon: scan failed: " << error.what() << '\n';
             return Error;
         }
+    }
+
+    // Captures a face here, in the sandbox, so OpenCV never handles camera frames as root.
+    int enrollFace(int client, const std::string &user, const std::string &label)
+    {
+        const auto hungUp = [client] {
+            return clientHungUp(client);
+        };
+        const std::optional<TurnQueue::Turn> turn = m_camera.take(0, hungUp);
+        if (!turn) {
+            return Aborted;
+        }
+        constexpr std::size_t manyModels = 3;
+        std::vector<FaceModel> models = loadModels(user);
+        if (models.size() > manyModels) {
+            say(client, "NOTICE: Each additional model slows down the face recognition engine slightly");
+        }
+        const int nextId = models.empty() ? 0 : models.back().id + 1;
+        FaceModel model{nextId, faceLabel(label, nextId), std::time(nullptr), {}};
+        try {
+            const ScanResult result = enroll(
+                Config(),
+                model.encodings,
+                [client](const std::string &line) {
+                    say(client, line);
+                },
+                hungUp);
+            if (result.code != Recognized) {
+                say(client, result.message);
+                return Error;
+            }
+        } catch (const std::exception &error) {
+            std::cerr << "kenning daemon: enrolment failed: " << error.what() << '\n';
+            say(client, "Face recognition failed to start");
+            return Error;
+        }
+        models.push_back(model);
+        if (!saveModels(user, models)) {
+            say(client, "Could not save the face model");
+            return Error;
+        }
+        say(client, "Face model saved as \"" + model.label + "\" (ID " + std::to_string(nextId) + ")");
+        return Recognized;
     }
 
     bool isLockedOut(uid_t uid, const FailureLimits &limits)

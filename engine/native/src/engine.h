@@ -46,6 +46,6 @@ ScanResult compare(const Config &config, const std::string &user, const std::fun
 
 using ProgressCallback = std::function<void(const std::string &)>;
 
-// Enrols one face: straight, then turned left, right, up and down.
-ScanResult enroll(const Config &config, std::vector<cv::Mat> &encodings, const ProgressCallback &progress);
+// Enrols one face: straight, then turned left, right, up and down, until cancelled() returns true.
+ScanResult enroll(const Config &config, std::vector<cv::Mat> &encodings, const ProgressCallback &progress, const std::function<bool()> &cancelled = {});
 }

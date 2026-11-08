@@ -107,6 +107,24 @@ bool saveModels(const std::string &user, const std::vector<FaceModel> &models)
     return writeModels(path, models) && giveToService(path);
 }
 
+std::string faceLabel(std::string label, int id)
+{
+    std::erase_if(label, [](char c) {
+        return c == ',' || (static_cast<unsigned char>(c) < 0x20) || c == 0x7f;
+    });
+    if (label.size() > std::size_t(maxLabelLength)) {
+        label.resize(std::size_t(maxLabelLength));
+        // Drop a character the cut split: trailing continuation bytes, then their lead byte.
+        while (!label.empty() && (static_cast<unsigned char>(label.back()) & 0xC0) == 0x80) {
+            label.pop_back();
+        }
+        if (!label.empty() && static_cast<unsigned char>(label.back()) >= 0xC0) {
+            label.pop_back();
+        }
+    }
+    return label.empty() ? "Model #" + std::to_string(id) : label;
+}
+
 bool giveToService(const std::string &path)
 {
     if (geteuid() != 0) {

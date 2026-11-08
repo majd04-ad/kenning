@@ -52,42 +52,30 @@ int requireRoot()
     return 0;
 }
 
-int add(const std::string &user, std::string label, bool plain)
+int add(const std::string &user, const std::string &label, bool plain)
 {
     if (const int error = requireRoot()) {
         return error;
     }
-    constexpr std::size_t manyModels = 3;
-    std::vector<FaceModel> models = loadModels(user);
-    if (models.size() > manyModels) {
-        std::cout << "NOTICE: Each additional model slows down the face recognition engine slightly\n";
-    }
-    const int nextId = models.empty() ? 0 : models.back().id + 1;
-    std::erase(label, ',');
-    if (label.empty()) {
-        label = "Model #" + std::to_string(nextId);
-    }
-    label = label.substr(0, std::size_t(maxLabelLength));
     if (!plain) {
         std::cout << "Adding face model for the user " << user << '\n';
     }
-
-    FaceModel model{nextId, label, std::time(nullptr), {}};
-    const ScanResult result = enroll(Config(), model.encodings, [](const std::string &line) {
-        std::cout << line << std::endl;
-    });
-    if (result.code != Recognized) {
-        std::cout << result.message << std::endl;
+    // The service captures the face in its sandbox, so OpenCV doesn't run as root here.
+    constexpr int enrolmentLineTimeoutSeconds = 30;
+    const Reply reply = callService({.command = "enroll",
+                                     .user = user,
+                                     .argument = label,
+                                     .idleTimeoutSeconds = enrolmentLineTimeoutSeconds,
+                                     .onMessage =
+                                         [](MessageKind, const std::string &line) {
+                                             std::cout << line << std::endl;
+                                         },
+                                     .cancelled = {}});
+    if (reply.code < 0) {
+        std::cout << "The Kenning service isn't reachable at " << socketPath << std::endl;
         return Error;
     }
-
-    models.push_back(model);
-    if (!saveModels(user, models)) {
-        std::cout << "Could not save the face model" << std::endl;
-        return Error;
-    }
-    std::cout << "Face model saved as \"" << label << "\" (ID " << nextId << ")" << std::endl;
-    return 0;
+    return reply.code;
 }
 
 int remove(const std::string &user, const std::string &idText)
