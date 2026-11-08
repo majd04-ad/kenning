@@ -9,6 +9,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBSYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
 
 set(KENNING_BINARY ${CMAKE_INSTALL_FULL_BINDIR}/kenning)
+# Where PAM looks for modules: lib/security, lib64/security or the multiarch lib/<triplet>/security
+set(KENNING_PAM_MODULE ${CMAKE_INSTALL_FULL_LIBDIR}/security/pam_kenning.so)
 set(KENNING_SYSCONFDIR ${CMAKE_INSTALL_FULL_SYSCONFDIR}/kenning CACHE PATH "Config and face models")
 set(KENNING_DATADIR ${CMAKE_INSTALL_FULL_DATADIR}/kenning CACHE PATH "Recognition networks")
 set(KENNING_SOCKET /run/kenning.sock CACHE STRING "Socket of the face unlock service")
@@ -21,6 +23,9 @@ target_compile_definitions(kenning-config INTERFACE
     KENNING_DATADIR="${KENNING_DATADIR}"
     KENNING_SOCKET="${KENNING_SOCKET}"
     KENNING_SERVICE_USER="${KENNING_SERVICE_USER}"
+    KENNING_BINARY="${KENNING_BINARY}"
+    KENNING_PAM_MODULE="${KENNING_PAM_MODULE}"
+    KENNING_LIBEXECDIR="${KENNING_LIBEXECDIR}"
 )
 
 add_library(kenning-engine STATIC
