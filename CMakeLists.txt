@@ -15,6 +15,9 @@ set(KENNING_NETWORKS_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH
 
 include(CTest)
 
+# Helper scripts; not libexec, so the paths in the packaging scripts are the same everywhere.
+set(KENNING_LIBEXECDIR ${CMAKE_INSTALL_PREFIX}/lib/kenning)
+
 add_subdirectory(engine/native)
 if(KENNING_BUILD_SETTINGS)
     add_subdirectory(kcm)
@@ -45,8 +48,8 @@ foreach(network face_detection_yunet_2023mar.onnx face_recognition_sface_2021dec
     install(FILES "${network_file}" DESTINATION ${CMAKE_INSTALL_DATADIR}/kenning/models RENAME ${network})
 endforeach()
 
-install(PROGRAMS packaging/pam-tidy packaging/setup-prompt lockscreen/kenning-lockscreen.py DESTINATION lib/kenning)
-install(FILES kcm/src/ui/FaceScanIndicator.qml DESTINATION lib/kenning)
+install(PROGRAMS packaging/pam-tidy packaging/setup-prompt lockscreen/kenning-lockscreen.py DESTINATION ${KENNING_LIBEXECDIR})
+install(FILES kcm/src/ui/FaceScanIndicator.qml DESTINATION ${KENNING_LIBEXECDIR})
 install(FILES packaging/org.kde.kenning.setupprompt.desktop DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/xdg/autostart)
 
 set(wants "lib/systemd/system/sockets.target.wants")
