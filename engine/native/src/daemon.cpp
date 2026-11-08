@@ -9,16 +9,20 @@
 #include "failurelimiter.h"
 #include "service.h"
 #include "signedin.h"
+#include "turnqueue.h"
 
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <mutex>
 #include <poll.h>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <systemd/sd-login.h>
+#include <thread>
 
 namespace FaceUnlock
 {
@@ -29,6 +33,8 @@ constexpr int idleExitMs = 5 * 60 * 1000;
 // A client that connects and says nothing must not hold up everyone else.
 constexpr int clientTimeoutSeconds = 2;
 constexpr std::size_t maxRequestLength = 255;
+// Each connection has a thread; more than this at once are turned away.
+constexpr int maxConnections = 32;
 // In /run like pam_faillock's records: kept across service restarts, cleared at reboot.
 constexpr const char *failuresPath = "/run/kenning/failures";
 constexpr const char *signedInPath = "/run/kenning/signed-in";
@@ -162,12 +168,14 @@ public:
     bool canExit()
     {
         // Exiting would forget failed attempts and lockouts.
+        const std::lock_guard lock(m_state);
         return m_failures.isEmpty(FailureLimiter::Clock::now());
     }
 
 private:
     bool signedInSinceBoot(uid_t uid)
     {
+        const std::lock_guard lock(m_state);
         if (m_signedIn.contains(uid)) {
             return true;
         }
@@ -187,6 +195,7 @@ private:
         if (!std::filesystem::exists(modelPath(user))) {
             return NoModel;
         }
+        const std::lock_guard lock(m_state);
         return m_failures.isLockedOut(uid, FailureLimits::fromConfig(Config()), FailureLimiter::Clock::now()) ? LockedOut : Recognized;
     }
 
@@ -195,20 +204,32 @@ private:
         // Read per request so settings changes apply without a restart.
         const Config config;
         const FailureLimits limits = FailureLimits::fromConfig(config);
-        if (m_failures.isLockedOut(uid, limits, FailureLimiter::Clock::now())) {
+        if (isLockedOut(uid, limits)) {
             return LockedOut;
+        }
+        const auto hungUp = [client] {
+            return clientHungUp(client);
+        };
+        // One scan at a time; a user whose request is already waiting can't add another.
+        const std::optional<TurnQueue::Turn> turn = m_camera.take(uid, hungUp);
+        if (!turn) {
+            return Aborted;
         }
         // A broken install must answer "failed", so PAM falls back to the password.
         try {
-            const ScanResult result = compare(config, user, [client] {
-                return clientHungUp(client);
-            });
+            const ScanResult result = compare(config, user, hungUp);
             recordResult(user, uid, result, limits);
             return result.code;
         } catch (const std::exception &error) {
             std::cerr << "kenning daemon: scan failed: " << error.what() << '\n';
             return Error;
         }
+    }
+
+    bool isLockedOut(uid_t uid, const FailureLimits &limits)
+    {
+        const std::lock_guard lock(m_state);
+        return m_failures.isLockedOut(uid, limits, FailureLimiter::Clock::now());
     }
 
     void restoreFailures()
@@ -226,6 +247,7 @@ private:
 
     void recordResult(const std::string &user, uid_t uid, const ScanResult &result, const FailureLimits &limits)
     {
+        const std::lock_guard lock(m_state);
         if (result.code == Recognized) {
             m_failures.recordSuccess(uid);
             saveFailures();
@@ -242,8 +264,11 @@ private:
         saveFailures();
     }
 
+    // Guards m_failures and m_signedIn: each connection is served in a thread of its own.
+    std::mutex m_state;
     FailureLimiter m_failures;
     SignedInUsers m_signedIn;
+    TurnQueue m_camera;
 };
 }
 
@@ -260,11 +285,12 @@ int runDaemon()
     }
 
     Service service;
+    std::atomic<int> connections = 0;
     for (;;) {
         pollfd waiting{listener, POLLIN, 0};
         const int ready = poll(&waiting, 1, activated ? idleExitMs : -1);
         if (ready == 0) {
-            if (service.canExit()) {
+            if (connections == 0 && service.canExit()) {
                 return 0;
             }
             continue;
@@ -279,8 +305,18 @@ int runDaemon()
         if (client < 0) {
             continue;
         }
-        service.serve(client);
-        close(client);
+        // A scan takes seconds; questions such as has-model must not wait for it.
+        if (++connections > maxConnections) {
+            --connections;
+            reply(client, Aborted);
+            close(client);
+            continue;
+        }
+        std::thread([&service, &connections, client] {
+            service.serve(client);
+            close(client);
+            --connections;
+        }).detach();
     }
 }
 }
