@@ -21,7 +21,10 @@ Item {
     property color successColor
     property color failureColor
     property color textColor
+    // Optional: "face" or "fingerprint", what is being read; hosts before 0.9 don't set it.
+    property string method: "face"
 
+    readonly property bool fingerprint: method === "fingerprint"
     readonly property bool scanning: faceState === 1
     readonly property bool recognized: faceState === 2
     readonly property bool failed: faceState === 3
@@ -134,12 +137,84 @@ Item {
                 }
             }
 
+// Fingerprint: the ridges light up from the core outwards while the reader waits.
+            Item {
+                id: fingerprintGlyph
+                anchors.centerIn: parent
+                width: parent.width * 0.5
+                height: width
+                visible: root.fingerprint
+                opacity: root.recognized ? 0 : 1
+                scale: root.recognized ? 0.6 : 1
+
+                Behavior on opacity {
+                    NumberAnimation {
+                        duration: Kirigami.Units.longDuration
+                    }
+                }
+                Behavior on scale {
+                    NumberAnimation {
+                        duration: Kirigami.Units.longDuration
+                        easing.type: Easing.InBack
+                    }
+                }
+
+                // [radius, start angle, sweep] of each ridge, core first; arcs open at the bottom
+                Repeater {
+                    model: [[0.08, 180, 180], [0.17, 160, 250], [0.26, 150, 240], [0.35, 165, 210], [0.45, 195, 150]]
+
+                    Shape {
+                        id: ridge
+                        required property var modelData
+                        required property int index
+                        anchors.fill: parent
+                        preferredRendererType: Shape.CurveRenderer
+
+                        property real glow: 1
+                        opacity: root.scanning ? glow : 1
+
+                        SequentialAnimation on glow {
+                            running: root.scanning
+                            loops: Animation.Infinite
+                            alwaysRunToEnd: true
+                            PauseAnimation { duration: ridge.index * 140 }
+                            NumberAnimation { from: 0.3; to: 1; duration: 350; easing.type: Easing.OutQuad }
+                            NumberAnimation { from: 1; to: 0.3; duration: 500; easing.type: Easing.InQuad }
+                            PauseAnimation { duration: (4 - ridge.index) * 140 + 300 }
+                        }
+
+                        ShapePath {
+                            strokeColor: root.accent
+                            strokeWidth: Math.max(2, fingerprintGlyph.width * 0.06)
+                            fillColor: "transparent"
+                            capStyle: ShapePath.RoundCap
+
+                            PathAngleArc {
+                                centerX: fingerprintGlyph.width / 2
+                                centerY: fingerprintGlyph.height * 0.55
+                                radiusX: fingerprintGlyph.width * ridge.modelData[0]
+                                radiusY: fingerprintGlyph.height * ridge.modelData[0] * 1.15
+                                startAngle: ridge.modelData[1]
+                                sweepAngle: ridge.modelData[2]
+                            }
+
+                            Behavior on strokeColor {
+                                ColorAnimation {
+                                    duration: Kirigami.Units.longDuration
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
 // Eyes glance around while looking; a frown on failure, a checkmark on success.
             Item {
                 id: face
                 anchors.centerIn: parent
                 width: parent.width * 0.5
                 height: width
+                visible: !root.fingerprint
                 opacity: root.recognized ? 0 : 1
                 scale: root.recognized ? 0.6 : 1
 

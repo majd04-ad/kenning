@@ -18,8 +18,12 @@ KCM.GridViewKCM {
 
     readonly property string selected: kcm.settings["Appearance/AnimationStyle"]
 
-    readonly property var previewStates: [[1, i18n("Looking for you…")], [2, i18n("Welcome, %1", kcm.userName)],
-                                          [1, i18n("Looking for you…")], [3, i18n("Couldn't recognize you")]]
+    // [state, message, method]: the face, then a finger
+    readonly property var previewStates: [[1, i18n("Looking for you…"), "face"], [2, i18n("Welcome, %1", kcm.userName), "face"],
+                                          [1, i18n("Looking for you…"), "face"], [3, i18n("Couldn't recognize you"), "face"],
+                                          [1, i18n("Place your finger on the fingerprint reader"), "fingerprint"],
+                                          [3, i18n("Fingerprint not recognized, try again"), "fingerprint"],
+                                          [2, i18n("Welcome, %1", kcm.userName), "fingerprint"]]
     property int previewStep: 0
 
     Timer {
@@ -39,7 +43,7 @@ KCM.GridViewKCM {
 
     QtDialogs.FileDialog {
         id: themeFileDialog
-        title: i18nc("@title:window", "Install Face Unlock Theme")
+        title: i18nc("@title:window", "Install Scan Animation Theme")
         nameFilters: [i18n("Theme archives (*.tar.gz *.tar.xz *.tar.zst *.tgz *.zip)")]
         onAccepted: kcm.installTheme(selectedFile)
     }
@@ -71,6 +75,7 @@ KCM.GridViewKCM {
                 style: tile.modelData.id
                 faceState: page.previewStates[page.previewStep][0]
                 message: page.previewStates[page.previewStep][1]
+                method: page.previewStates[page.previewStep][2]
             }
         }
         actions: [
