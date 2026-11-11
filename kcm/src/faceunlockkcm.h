@@ -27,6 +27,8 @@ class FaceUnlockKcm : public KQuickConfigModule
     Q_PROPERTY(QString previewPath READ previewPath NOTIFY settingsChanged)
     // A colour webcam rather than an IR camera
     Q_PROPERTY(bool colourCamera READ colourCamera NOTIFY settingsChanged)
+    // The camera face unlock was set up with is switched off or unplugged
+    Q_PROPERTY(bool cameraAway READ cameraAway NOTIFY settingsChanged)
     Q_PROPERTY(bool engineInstalled READ engineInstalled CONSTANT)
     Q_PROPERTY(bool lockScreenPatched READ lockScreenPatched CONSTANT)
     Q_PROPERTY(bool loginScreenSupported READ loginScreenSupported CONSTANT)
@@ -45,6 +47,7 @@ public:
     QString devicePath() const;
     QString previewPath() const;
     bool colourCamera() const;
+    bool cameraAway() const;
     bool engineInstalled() const;
     bool lockScreenPatched() const;
     bool loginScreenSupported() const;
@@ -87,6 +90,7 @@ private:
     QString m_devicePath;
     QString m_previewPath;
     bool m_colourCamera = false;
+    bool m_cameraAway = false;
     bool m_fingerprintEnrolled = false;
     bool m_lockScreenFaceService = false;
     bool m_busy = false;
