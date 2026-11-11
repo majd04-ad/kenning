@@ -1,0 +1,12 @@
+// SPDX-FileCopyrightText: 2026 Majd Abu Diab
+// SPDX-License-Identifier: CC0-1.0
+//
+// The Kenning service checks fingerprints for the lock screen, the login screen and
+// administrator prompts. It has no session, so fprintd would refuse it; it may verify (only
+// verify, never enrol or delete) any user's finger, as pam_fprintd running as root may.
+polkit.addRule(function (action, subject) {
+    if ((action.id == "net.reactivated.fprint.device.verify" || action.id == "net.reactivated.fprint.device.setusername")
+        && subject.user == "@KENNING_SERVICE_USER@") {
+        return polkit.Result.YES;
+    }
+});
