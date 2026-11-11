@@ -1,12 +1,12 @@
 diff --git a/src/auth/Auth.cpp b/src/auth/Auth.cpp
-index 66f76b9..a318fa3 100644
+index 66f76b9..04459bd 100644
 --- a/src/auth/Auth.cpp
 +++ b/src/auth/Auth.cpp
 @@ -60,6 +60,7 @@ public:
      QString user{};
      bool autologin{false};
      bool greeter{false};
-+    bool skipFace{false};
++    QString kenningMethod{};
      QProcessEnvironment environment{};
      qint64 id{0};
      static qint64 lastId;
@@ -14,9 +14,9 @@ index 66f76b9..a318fa3 100644
      }
  }
  
-+void Auth::setSkipFace(bool on)
++void Auth::setKenningMethod(const QString &method)
 +{
-+    d->skipFace = on;
++    d->kenningMethod = method;
 +}
 +
  void Auth::setSession(const QString &path)
@@ -26,42 +26,110 @@ index 66f76b9..a318fa3 100644
      if (d->greeter) {
          args << QStringLiteral("--greeter");
      }
-+    if (d->skipFace) {
-+        args << QStringLiteral("--skip-face");
++    if (!d->kenningMethod.isEmpty()) {
++        args << QStringLiteral("--kenning-method") << d->kenningMethod;
 +    }
      d->child->start(QStringLiteral("%1/plasmalogin-helper").arg(QStringLiteral(LIBEXEC_INSTALL_DIR)), args);
  }
  
 diff --git a/src/auth/Auth.h b/src/auth/Auth.h
-index bc95301..d841efa 100644
+index bc95301..b383363 100644
 --- a/src/auth/Auth.h
 +++ b/src/auth/Auth.h
-@@ -112,6 +112,11 @@ public:
+@@ -112,6 +112,12 @@ public:
       */
      void setGreeter(bool on = true);
  
 +    /**
-+     * Skip face recognition: the user already typed a password
++     * How Kenning signs in: "password" when the user typed one (no face scan),
++     * "fingerprint" for the Fingerprint button, empty for the face
 +     */
-+    void setSkipFace(bool on = true);
++    void setKenningMethod(const QString &method);
 +
      /**
       * Forwards the output of the underlying authenticator to the current process
       * @param on true if should forward the output
 diff --git a/src/daemon/Display.cpp b/src/daemon/Display.cpp
-index 5963e59..cad25ff 100644
+index 5963e59..2acd150 100644
 --- a/src/daemon/Display.cpp
 +++ b/src/daemon/Display.cpp
-@@ -289,6 +289,9 @@ bool Display::startAuth(const QString &user, const QString &password, const Sess
+@@ -207,9 +207,10 @@ void Display::stop()
+     emit stopped();
+ }
+ 
+-void Display::login(QLocalSocket *socket, const QString &user, const QString &password, const Session &session)
++void Display::login(QLocalSocket *socket, const QString &user, const QString &password, const Session &session, const QString &kenningMethod)
+ {
+     m_socket = socket;
++    m_kenningMethod = kenningMethod;
+ 
+     // the PLASMALOGIN user has special privileges that skip password checking so that we can load the greeter
+     // block ever trying to log in as the PLASMALOGIN user
+@@ -289,6 +290,10 @@ bool Display::startAuth(const QString &user, const QString &password, const Sess
          m_auth->setSession(session.exec());
      }
      m_auth->insertEnvironment(env);
 +    // A typed password goes straight to the password check; the automatic
-+    // empty-password attempt is the one that runs face unlock.
-+    m_auth->setSkipFace(!m_passPhrase.isEmpty());
++    // empty-password attempt is the one that runs face unlock, unless the
++    // greeter's Fingerprint button asked for the finger.
++    m_auth->setKenningMethod(!m_passPhrase.isEmpty() ? QStringLiteral("password") : m_kenningMethod);
      m_auth->start();
  
      return true;
+diff --git a/src/daemon/Display.h b/src/daemon/Display.h
+index 2861ece..fabd03e 100644
+--- a/src/daemon/Display.h
++++ b/src/daemon/Display.h
+@@ -60,7 +60,7 @@ public slots:
+     bool start();
+     void stop();
+ 
+-    void login(QLocalSocket *socket, const QString &user, const QString &password, const Session &session);
++    void login(QLocalSocket *socket, const QString &user, const QString &password, const Session &session, const QString &kenningMethod);
+     void displayServerStarted();
+ 
+ signals:
+@@ -81,6 +81,7 @@ private:
+     VirtualTerminal::Terminal m_sessionTerminalId;
+ 
+     QString m_passPhrase;
++    QString m_kenningMethod;
+     QString m_sessionName;
+     QString m_reuseSessionId;
+ 
+diff --git a/src/daemon/SocketServer.cpp b/src/daemon/SocketServer.cpp
+index 7ac0fe5..27c6a8c 100644
+--- a/src/daemon/SocketServer.cpp
++++ b/src/daemon/SocketServer.cpp
+@@ -137,12 +137,12 @@ void SocketServer::readyRead()
+             qDebug() << "Message received from greeter: Login";
+ 
+             // read username, pasword etc.
+-            QString user, password, filename;
++            QString user, password, filename, kenningMethod;
+             Session session;
+-            input >> user >> password >> session;
++            input >> user >> password >> session >> kenningMethod;
+ 
+             // emit signal
+-            emit login(socket, user, password, session);
++            emit login(socket, user, password, session, kenningMethod);
+         } break;
+         default: {
+             // log message
+diff --git a/src/daemon/SocketServer.h b/src/daemon/SocketServer.h
+index baba7b5..7f641f4 100644
+--- a/src/daemon/SocketServer.h
++++ b/src/daemon/SocketServer.h
+@@ -50,7 +50,7 @@ public slots:
+     void loginSucceeded(QLocalSocket *socket);
+ 
+ signals:
+-    void login(QLocalSocket *socket, const QString &user, const QString &password, const Session &session);
++    void login(QLocalSocket *socket, const QString &user, const QString &password, const Session &session, const QString &kenningMethod);
+     void connected();
+ 
+ private:
 diff --git a/src/frontend/greeter/CMakeLists.txt b/src/frontend/greeter/CMakeLists.txt
 index 9084f28..d165a4a 100644
 --- a/src/frontend/greeter/CMakeLists.txt
@@ -74,8 +142,46 @@ index 9084f28..d165a4a 100644
  
      RESOURCES
      qml/faces/.face.icon
+diff --git a/src/frontend/greeter/backend/GreeterProxy.cpp b/src/frontend/greeter/backend/GreeterProxy.cpp
+index 9e824c3..606cadc 100644
+--- a/src/frontend/greeter/backend/GreeterProxy.cpp
++++ b/src/frontend/greeter/backend/GreeterProxy.cpp
+@@ -56,9 +56,13 @@ void GreeterProxy::setSessionModel(SessionModel *model)
+     d->sessionModel = model;
+ }
+ 
+-void GreeterProxy::login(const QString &user, const QString &password, const PLASMALOGIN::SessionType sessionType, const QString &sessionFileName) const
++void GreeterProxy::login(const QString &user,
++                         const QString &password,
++                         const PLASMALOGIN::SessionType sessionType,
++                         const QString &sessionFileName,
++                         const QString &kenningMethod) const
+ {
+-    SocketWriter(d->socket) << quint32(GreeterMessages::Login) << user << password << static_cast<uint32_t>(sessionType) << sessionFileName;
++    SocketWriter(d->socket) << quint32(GreeterMessages::Login) << user << password << static_cast<uint32_t>(sessionType) << sessionFileName << kenningMethod;
+ }
+ 
+ void GreeterProxy::connected()
+diff --git a/src/frontend/greeter/backend/GreeterProxy.h b/src/frontend/greeter/backend/GreeterProxy.h
+index e6c7851..2294618 100644
+--- a/src/frontend/greeter/backend/GreeterProxy.h
++++ b/src/frontend/greeter/backend/GreeterProxy.h
+@@ -40,7 +40,12 @@ public:
+     void setSessionModel(SessionModel *model);
+ 
+ public slots:
+-    void login(const QString &user, const QString &password, const PLASMALOGIN::SessionType sessionType, const QString &sessionFileName) const;
++    // kenningMethod: "fingerprint" for Kenning's Fingerprint button, else empty
++    void login(const QString &user,
++               const QString &password,
++               const PLASMALOGIN::SessionType sessionType,
++               const QString &sessionFileName,
++               const QString &kenningMethod = QString()) const;
+ 
+ private slots:
+     void connected();
 diff --git a/src/frontend/greeter/main.cpp b/src/frontend/greeter/main.cpp
-index cbb37eb..9e3c47d 100644
+index cbb37eb..70aa6ad 100644
 --- a/src/frontend/greeter/main.cpp
 +++ b/src/frontend/greeter/main.cpp
 @@ -9,10 +9,13 @@
@@ -145,7 +251,7 @@ index cbb37eb..9e3c47d 100644
  class LoginGreeter : public QObject
  {
      Q_OBJECT
-@@ -132,6 +181,14 @@ int main(int argc, char *argv[])
+@@ -132,6 +181,15 @@ int main(int argc, char *argv[])
      qmlRegisterSingletonInstance("org.kde.plasma.login", 0, 1, "BlurScreenBridge", new BlurScreenBridge);
      qmlRegisterType<GreeterEventFilter>("org.kde.plasma.login", 0, 1, "GreeterEventFilter");
  
@@ -154,6 +260,7 @@ index cbb37eb..9e3c47d 100644
 +    auto *faceUnlock = new QQmlPropertyMap(&app);
 +    faceUnlock->insert(QStringLiteral("animationStyle"), faceUnlockConfig.group(QStringLiteral("Appearance")).readEntry("AnimationStyle", QStringLiteral("hello")));
 +    faceUnlock->insert(QStringLiteral("autoScan"), faceUnlockConfig.group(QStringLiteral("LoginScreen")).readEntry("AutoScan", true));
++    faceUnlock->insert(QStringLiteral("fingerprint"), faceUnlockConfig.group(QStringLiteral("LoginScreen")).readEntry("Fingerprint", false));
 +    qmlRegisterSingletonInstance("org.kde.plasma.login", 0, 1, "FaceUnlockConfig", faceUnlock);
 +    qmlRegisterSingletonInstance("org.kde.plasma.login", 0, 1, "FaceUnlockService", new FaceUnlockService(&app));
 +
@@ -161,13 +268,36 @@ index cbb37eb..9e3c47d 100644
      return app.exec();
  }
 diff --git a/src/frontend/greeter/mockbackend/MockGreeterProxy.cpp b/src/frontend/greeter/mockbackend/MockGreeterProxy.cpp
-index f5ea2ab..5de5530 100644
+index f5ea2ab..58a1513 100644
 --- a/src/frontend/greeter/mockbackend/MockGreeterProxy.cpp
 +++ b/src/frontend/greeter/mockbackend/MockGreeterProxy.cpp
-@@ -32,6 +32,29 @@ void MockGreeterProxy::login(const QString &user, const QString &password, const
+@@ -15,7 +15,11 @@ MockGreeterProxy::MockGreeterProxy()
+     qDebug().noquote() << QStringLiteral("Mock backend in use, use password %1 for successful login on any user").arg(s_mockPassword);
+ }
+ 
+-void MockGreeterProxy::login(const QString &user, const QString &password, const PLASMALOGIN::SessionType sessionType, const QString &sessionFileName) const
++void MockGreeterProxy::login(const QString &user,
++                             const QString &password,
++                             const PLASMALOGIN::SessionType sessionType,
++                             const QString &sessionFileName,
++                             const QString &kenningMethod) const
+ {
+     bool const success = (!user.isEmpty() && password == s_mockPassword);
+ 
+@@ -32,6 +36,39 @@ void MockGreeterProxy::login(const QString &user, const QString &password, const
      qDebug().nospace() << "Login " << (success ? "success" : "failure") << " with user " << user << ", password " << password << ", session " << sessionTypeName
                         << " " << sessionFileName;
  
++    // Kenning's Fingerprint button: a finger that is read after a moment.
++    if (kenningMethod == QLatin1String("fingerprint") && !user.isEmpty()) {
++        auto *self = const_cast<MockGreeterProxy *>(this);
++        Q_EMIT self->informationMessage(QStringLiteral("Place your finger on the fingerprint reader"));
++        QTimer::singleShot(2500, self, [self]() {
++            Q_EMIT self->loginSucceeded();
++        });
++        return;
++    }
++
 +    // An empty password plays a pam_howdy face unlock; PLASMALOGIN_MOCK_FACE=fail makes it fail.
 +    if (password.isEmpty() && !user.isEmpty()) {
 +        const bool faceSuccess = qEnvironmentVariable("PLASMALOGIN_MOCK_FACE") != QLatin1String("fail");
@@ -194,8 +324,25 @@ index f5ea2ab..5de5530 100644
      if (success) {
          QTimer::singleShot(100, this, &MockGreeterProxy::loginSucceeded);
          QTimer::singleShot(800, []() {
+diff --git a/src/frontend/greeter/mockbackend/MockGreeterProxy.h b/src/frontend/greeter/mockbackend/MockGreeterProxy.h
+index c327ea4..9a92040 100644
+--- a/src/frontend/greeter/mockbackend/MockGreeterProxy.h
++++ b/src/frontend/greeter/mockbackend/MockGreeterProxy.h
+@@ -15,7 +15,11 @@ class MockGreeterProxy : public QObject
+ public:
+     MockGreeterProxy();
+ public Q_SLOTS:
+-    void login(const QString &user, const QString &password, const PLASMALOGIN::SessionType sessionType, const QString &sessionFileName) const;
++    void login(const QString &user,
++               const QString &password,
++               const PLASMALOGIN::SessionType sessionType,
++               const QString &sessionFileName,
++               const QString &kenningMethod = QString()) const;
+ 
+ Q_SIGNALS:
+     void informationMessage(const QString &message);
 diff --git a/src/frontend/greeter/qml/GreeterState.qml b/src/frontend/greeter/qml/GreeterState.qml
-index f3233e1..7fceae1 100644
+index f3233e1..bfe49f7 100644
 --- a/src/frontend/greeter/qml/GreeterState.qml
 +++ b/src/frontend/greeter/qml/GreeterState.qml
 @@ -18,6 +18,13 @@ Item {
@@ -262,16 +409,30 @@ index f3233e1..7fceae1 100644
          }
  
          // inputPanel.keyboardActive
-@@ -163,6 +206,8 @@ Item {
+@@ -161,14 +204,21 @@ Item {
+     property string lastLoggedInUser
+     property string lastLoggedInSession
  
++    // "fingerprint" while Kenning's Fingerprint button starts a login, else empty
++    property string loginMethod: ""
++
      function handleLoginRequest(username, password) {
++        const method = greeterState.loginMethod;
++        greeterState.loginMethod = "";
          greeterState.lastLoggedInUser = username;
 +        greeterState.faceState = GreeterState.FaceState.Idle;
 +        greeterState.faceCanRetry = false;
  
          let sessionType = PlasmaLogin.SessionModel.data(PlasmaLogin.SessionModel.index(greeterState.sessionIndex, 0), PlasmaLogin.SessionModel.TypeRole)
          let sessionFileName = PlasmaLogin.SessionModel.data(PlasmaLogin.SessionModel.index(greeterState.sessionIndex, 0), PlasmaLogin.SessionModel.FileNameRole)
-@@ -218,10 +263,54 @@ Item {
+         greeterState.lastLoggedInSession = sessionFileName;
+ 
+-        PlasmaLogin.Authenticator.login(username, password, sessionType, sessionFileName);
++        PlasmaLogin.Authenticator.login(username, password, sessionType, sessionFileName, method);
+     }
+ 
+     property var lastLoggedInSessions: {
+@@ -218,10 +268,54 @@ Item {
              PlasmaLogin.StateConfig.lastLoggedInUser = greeterState.lastLoggedInUser;
              setLastLoggedInSessionForUser(greeterState.lastLoggedInUser, greeterState.lastLoggedInSession);
              PlasmaLogin.StateConfig.save();
@@ -327,10 +488,10 @@ index f3233e1..7fceae1 100644
      }
  }
 diff --git a/src/frontend/greeter/qml/Login.qml b/src/frontend/greeter/qml/Login.qml
-index e222c88..82ab632 100644
+index e222c88..059cc7d 100644
 --- a/src/frontend/greeter/qml/Login.qml
 +++ b/src/frontend/greeter/qml/Login.qml
-@@ -31,6 +31,25 @@ SessionManagementScreen {
+@@ -31,6 +31,39 @@ SessionManagementScreen {
  
      property real fontSize: Kirigami.Theme.defaultFont.pointSize
  
@@ -351,12 +512,26 @@ index e222c88..82ab632 100644
 +            text: i18ndc("plasma_login", "@action:button", "Try Face Again")
 +            onClicked: startLogin()
 +        }
++
++        // Kenning reads the finger only when asked, never beside the password.
++        PlasmaComponents3.Button {
++            Layout.alignment: Qt.AlignHCenter
++            visible: PlasmaLogin.FaceUnlockConfig.fingerprint
++                     && PlasmaLogin.GreeterState.faceState !== PlasmaLogin.GreeterState.FaceState.Scanning
++                     && !passwordBox.text && (!showUsernamePrompt || userNameInput.text)
++            icon.name: "fingerprint-symbolic"
++            text: i18ndc("plasma_login", "@action:button", "Use Fingerprint")
++            onClicked: {
++                PlasmaLogin.GreeterState.loginMethod = "fingerprint";
++                startLogin();
++            }
++        }
 +    }
 +
      signal loginRequest(string username, string password)
  
      onUserSelected: {
-@@ -177,6 +196,20 @@ SessionManagementScreen {
+@@ -177,6 +210,20 @@ SessionManagementScreen {
              }
  
              passwordBox.showPassword = PlasmaLogin.GreeterState.showPassword;
@@ -420,7 +595,7 @@ index ae440c0..5a26c72 100644
              footer.opacity = 0;
          }
 diff --git a/src/helper/HelperApp.cpp b/src/helper/HelperApp.cpp
-index 9a21b83..e18c710 100644
+index 9a21b83..fac334b 100644
 --- a/src/helper/HelperApp.cpp
 +++ b/src/helper/HelperApp.cpp
 @@ -17,6 +17,12 @@
@@ -436,18 +611,21 @@ index 9a21b83..e18c710 100644
  #include <QtCore/QTimer>
  #include <QtNetwork/QLocalSocket>
  
-@@ -113,6 +119,10 @@ void HelperApp::setUp()
+@@ -113,6 +119,13 @@ void HelperApp::setUp()
          m_backend->setGreeter(true);
      }
  
-+    if ((pos = args.indexOf(QStringLiteral("--skip-face"))) >= 0) {
-+        m_backend->setSkipFace(true);
++    if ((pos = args.indexOf(QStringLiteral("--kenning-method"))) >= 0 && pos + 1 < args.size()) {
++        const QString method = args[pos + 1];
++        if (method == QLatin1String("password") || method == QLatin1String("fingerprint")) {
++            m_backend->setKenningMethod(method);
++        }
 +    }
 +
      if (server.isEmpty() || m_id <= 0) {
          qCritical() << "This application is not supposed to be executed manually";
          exit(Auth::HELPER_OTHER_ERROR);
-@@ -149,6 +159,14 @@ void HelperApp::doAuth()
+@@ -149,6 +162,14 @@ void HelperApp::doAuth()
      m_user = m_backend->userName();
      QProcessEnvironment env = authenticated(m_user);
  
@@ -463,7 +641,7 @@ index 9a21b83..e18c710 100644
          env.insert(m_session->processEnvironment());
          m_session->setProcessEnvironment(env);
 diff --git a/src/helper/backend/PamBackend.cpp b/src/helper/backend/PamBackend.cpp
-index 50f386d..a8f3711 100644
+index 50f386d..494a89e 100644
 --- a/src/helper/backend/PamBackend.cpp
 +++ b/src/helper/backend/PamBackend.cpp
 @@ -231,7 +231,15 @@ bool PamBackend::start(const QString &user)
@@ -471,13 +649,13 @@ index 50f386d..a8f3711 100644
  bool PamBackend::authenticate()
  {
 -    if (!m_pam->authenticate()) {
-+    if (m_skipFace) {
-+        m_pam->putEnv("FACEUNLOCK_SKIP=1");
++    if (!m_kenningMethod.isEmpty()) {
++        m_pam->putEnv(QByteArray("KENNING_METHOD=" + m_kenningMethod.toLatin1()).constData());
 +    }
 +    const bool authenticated = m_pam->authenticate();
-+    if (m_skipFace) {
++    if (!m_kenningMethod.isEmpty()) {
 +        // Keep it out of the session environment.
-+        m_pam->putEnv("FACEUNLOCK_SKIP");
++        m_pam->putEnv("KENNING_METHOD");
 +    }
 +    if (!authenticated) {
          m_app->error(m_pam->errorString(), Auth::ERROR_AUTHENTICATION);
@@ -509,34 +687,35 @@ index 50f386d..a8f3711 100644
      m_greeter = on;
  }
 +
-+void PamBackend::setSkipFace(bool on)
++void PamBackend::setKenningMethod(const QString &method)
 +{
-+    m_skipFace = on;
++    m_kenningMethod = method;
 +}
  }
  
  #include "moc_PamBackend.cpp"
 diff --git a/src/helper/backend/PamBackend.h b/src/helper/backend/PamBackend.h
-index e150e76..31f85d4 100644
+index e150e76..b591450 100644
 --- a/src/helper/backend/PamBackend.h
 +++ b/src/helper/backend/PamBackend.h
-@@ -53,6 +53,11 @@ public:
+@@ -53,6 +53,12 @@ public:
      int converse(int n, const struct pam_message **msg, struct pam_response **resp);
      void setAutologin(bool on = true);
      void setGreeter(bool on = true);
-+    // Asks face unlock modules to step aside (FACEUNLOCK_SKIP=1 in the PAM environment
-+    // while authenticating), for a login where the user typed a password.
-+    void setSkipFace(bool on = true);
++    // Tells Kenning how to sign in (KENNING_METHOD in the PAM environment while
++    // authenticating): "password" when the user typed one, so face unlock steps
++    // aside, or "fingerprint" for the greeter's Fingerprint button.
++    void setKenningMethod(const QString &method);
 +    // True for a user login that PAM accepted without a typed password (e.g. face unlock).
 +    bool passwordless() const;
  
  public slots:
      bool start(const QString &user = QString());
-@@ -66,6 +71,8 @@ private:
+@@ -66,6 +72,8 @@ private:
      HelperApp *m_app{nullptr};
      bool m_autologin{false};
      bool m_greeter{false};
-+    bool m_skipFace{false};
++    QString m_kenningMethod;
 +    bool m_passwordEntered{false};
      PamData *m_data{nullptr};
      PamHandle *m_pam{nullptr};
