@@ -25,6 +25,10 @@ namespace
 {
 using FaceUnlock::Config;
 
+// The camera is switched off, unplugged, in use by another program, or none is set up. The lock
+// and login screens look for "camera".
+constexpr const char *cameraMessage = "Failure, camera not available";
+
 void say(pam_handle_t *pamh, const std::string &message)
 {
     pam_info(pamh, "%s", message.c_str());
@@ -150,6 +154,13 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int, int, const char **)
         say(pamh, "Failure, use your password after a restart");
         return PAM_AUTHINFO_UNAVAIL;
     }
+    if (hasModel == FaceUnlock::NoCamera) {
+        // Said, and a failure rather than "unavailable": the lock screen then offers to try again
+        // once the camera is back, instead of dropping the Face method until the next lock.
+        say(pamh, cameraMessage);
+        pam_syslog(pamh, LOG_NOTICE, "Face unlock skipped: the camera is off, unplugged or not set up");
+        return PAM_AUTH_ERR;
+    }
     if (hasModel != FaceUnlock::Recognized) {
         return PAM_AUTHINFO_UNAVAIL;
     }
@@ -186,6 +197,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int, int, const char **)
         break;
     case FaceUnlock::TooBright:
         say(pamh, "Failure, image too bright");
+        break;
+    case FaceUnlock::NoCamera:
+        say(pamh, cameraMessage);
         break;
     default:
         say(pamh, "Failure, general abort");

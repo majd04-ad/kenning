@@ -5,6 +5,7 @@
 // kenning daemon: face checks for pam_kenning, so the face models stay root-only.
 
 #include "daemon.h"
+#include "camera.h"
 #include "engine.h"
 #include "failurelimiter.h"
 #include "service.h"
@@ -233,8 +234,15 @@ private:
         if (!std::filesystem::exists(modelPath(user), error)) {
             return NoModel;
         }
-        const std::lock_guard lock(m_state);
-        return m_failures.isLockedOut(uid, FailureLimits::fromConfig(Config()), FailureLimiter::Clock::now()) ? LockedOut : Recognized;
+        const Config config;
+        {
+            const std::lock_guard lock(m_state);
+            if (m_failures.isLockedOut(uid, FailureLimits::fromConfig(config), FailureLimiter::Clock::now())) {
+                return LockedOut;
+            }
+        }
+        // Switched off or unplugged: said before a scan starts, so nothing looks for a face in vain.
+        return cameraFor(config) ? Recognized : NoCamera;
     }
 
     int compareFace(int client, const std::string &user, uid_t uid)
@@ -261,11 +269,31 @@ private:
         try {
             const ScanResult result = compare(config, user, hungUp);
             recordResult(user, uid, result, limits);
+            logScan(user, result);
             return result.code;
         } catch (const std::exception &error) {
-            std::cerr << "kenning daemon: scan failed: " << error.what() << '\n';
+            std::cerr << "kenning daemon: scan failed: " << error.what() << std::endl;
             return Error;
         }
+    }
+
+    // One line per scan that didn't recognize anyone, for the journal: why face unlock didn't work.
+    static void logScan(const std::string &user, const ScanResult &result)
+    {
+        if (result.code == Recognized || result.code == Aborted) {
+            return;
+        }
+        const ScanStats &stats = result.stats;
+        std::cerr << "kenning daemon: scan for " << user << ": " << result.message << " (code " << result.code << "; " << stats.frames << " frames, "
+                  << stats.darkFrames << " too dark, " << stats.brightFrames << " too bright, " << stats.faceFrames << " with a face";
+        if (result.bestScore < noMatchScore) {
+            std::cerr << ", best score " << result.bestScore;
+        }
+        if (result.code == NoCamera) {
+            const Config config;
+            std::cerr << "; camera " << (cameraConfigured(config) ? config.string("video/device_path") : std::string("not set up, and no IR camera found"));
+        }
+        std::cerr << ")" << std::endl;
     }
 
     // Captures a face here, in the sandbox, so OpenCV never handles camera frames as root.
@@ -295,10 +323,13 @@ private:
                 hungUp);
             if (result.code != Recognized) {
                 say(client, result.message);
-                return Error;
+                if (result.code != Aborted) {
+                    std::cerr << "kenning daemon: enrolment for " << user << ": " << result.message << std::endl;
+                }
+                return result.code == NoCamera ? NoCamera : Error;
             }
         } catch (const std::exception &error) {
-            std::cerr << "kenning daemon: enrolment failed: " << error.what() << '\n';
+            std::cerr << "kenning daemon: enrolment failed: " << error.what() << std::endl;
             say(client, "Face recognition failed to start");
             return Error;
         }
@@ -369,6 +400,10 @@ int runDaemon()
         return Error;
     }
 
+    // OpenCV waits this many seconds for a frame (10 unless set): a camera that stops delivering
+    // must not hold a scan, and everyone queued behind it, for long past video/timeout.
+    setenv("OPENCV_VIDEOIO_V4L_SELECT_TIMEOUT", "3", 0);
+
     Service service;
     std::atomic<int> connections = 0;
     for (;;) {
@@ -398,7 +433,16 @@ int runDaemon()
             continue;
         }
         std::thread([&service, &connections, client] {
-            service.serve(client);
+            // Nothing a request does may end the service for everyone else.
+            try {
+                service.serve(client);
+            } catch (const std::exception &error) {
+                std::cerr << "kenning daemon: request failed: " << error.what() << std::endl;
+                reply(client, Error);
+            } catch (...) {
+                std::cerr << "kenning daemon: request failed" << std::endl;
+                reply(client, Error);
+            }
             close(client);
             --connections;
         }).detach();

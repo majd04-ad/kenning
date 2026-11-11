@@ -11,6 +11,7 @@
 #include <opencv2/videoio.hpp>
 
 #include <chrono>
+#include <string>
 #include <vector>
 
 namespace FaceUnlock
@@ -56,8 +57,11 @@ public:
 
     explicit Pipeline(const Config &config);
 
+    // False when the camera couldn't be opened: off, unplugged, in use or none set up.
     bool ready() const;
     bool colour() const;
+    // The camera in use; empty unless ready().
+    const std::string &device() const;
     double cameraMs() const;
     double networksMs() const;
 
@@ -71,6 +75,7 @@ public:
 
 private:
     cv::VideoCapture m_camera;
+    std::string m_device;
     cv::Ptr<cv::FaceDetectorYN> m_detector;
     cv::Ptr<cv::FaceRecognizerSF> m_recognizer;
     int m_maxHeight = 320;

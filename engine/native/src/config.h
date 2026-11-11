@@ -42,6 +42,7 @@ enum ExitCode {
     LockedOut = 14, // too many failed attempts (the service's rate limit)
     TooBright = 15, // washed out by sunlight or a bright lamp (Kenning only)
     NeedsPassword = 16, // no password sign-in since the computer started (Kenning only)
+    NoCamera = 17, // the camera is switched off, unplugged, in use, or none is set up (Kenning only)
 };
 
 // config.ini values keyed "section/key"

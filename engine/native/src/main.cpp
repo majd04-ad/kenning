@@ -109,11 +109,13 @@ int list(const std::string &user, bool plain)
     // Face models belong to the service user; others can only ask whether there are any.
     if (geteuid() != 0) {
         const int code = askService("has-model", user, quickTimeoutSeconds);
-        if (code == Recognized || code == LockedOut) {
+        if (code == Recognized || code == LockedOut || code == NoCamera) {
             if (!plain) {
                 std::cout << "Face recognition is set up for " << user << ". To see the face models, run:\n\n\tsudo kenning list\n";
                 if (code == LockedOut) {
                     std::cout << "\nFace unlock is paused for a few minutes after too many faces that weren't recognized.\n";
+                } else if (code == NoCamera) {
+                    std::cout << "\nThe camera isn't available: it is switched off, unplugged, or none is set up.\n";
                 }
             }
             return 0;
@@ -167,6 +169,12 @@ int testAsUser(const Config &config, const std::string &user)
         break;
     case LockedOut:
         std::cout << "Failure, too many attempts; face unlock is locked for a few minutes\n";
+        break;
+    case NoCamera:
+        std::cout << "Failure, camera not available (switched off, unplugged, in use, or none set up)\n";
+        break;
+    case NeedsPassword:
+        std::cout << "Failure, sign in with your password once after a restart\n";
         break;
     case -1:
         std::cout << "Failure, the Kenning service isn't reachable at " << socketPath << '\n';
