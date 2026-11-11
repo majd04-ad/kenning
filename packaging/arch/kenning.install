@@ -57,6 +57,12 @@ start_service() {
     systemctl start kenning.socket 2>/dev/null || true
 }
 
+# The user's service manager reads the drop-in that starts Kenning's polkit dialog at login.
+polkit_dialog_note() {
+    echo "  Kenning's dialog for administrator prompts starts at your next login, or now with:"
+    echo "      systemctl --user daemon-reload && systemctl --user restart plasma-polkit-agent"
+}
+
 post_install() {
     restore_settings
     /usr/lib/kenning/pam-tidy tidy
@@ -64,11 +70,12 @@ post_install() {
     migrate_from_faceunlock
     start_service
     if [[ -n $(find /etc/kenning/models -name '*.dat' 2>/dev/null) ]]; then
-        echo "  Face unlock is on again for the faces saved before. Where it is used is in"
-        echo "  System Settings > Face Unlock."
+        echo "  Face unlock is on again for the faces saved before. Where it is used, and each user's"
+        echo "  lock screen buttons, are in System Settings > Face & Fingerprint."
     else
-        echo "  Open System Settings > Face Unlock and press Set Up to start using face unlock."
+        echo "  Open System Settings > Face & Fingerprint and press Set Up to start using face unlock."
     fi
+    polkit_dialog_note
 }
 
 post_upgrade() {
@@ -80,6 +87,7 @@ post_upgrade() {
     # A running service keeps the old engine until it exits; start the new one.
     start_service
     systemctl try-restart kenning.service 2>/dev/null || true
+    polkit_dialog_note
 }
 
 pre_remove() {

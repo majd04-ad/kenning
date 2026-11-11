@@ -173,11 +173,27 @@ webcam:
       reboot does. No PAM changes: sudo and the lock screen always run inside a
       session. Autologin counts as signed in. Not yet: also asking again after
       48 hours without the password, as phones do
-- [ ] Set Up captures faces as root: the settings helper runs `kenning add`, so
-      OpenCV decodes camera frames with root rights during Set Up. Move capture
-      into the sandboxed service (an enrol request over the socket, root or the
-      user only), leaving the helper to start it and secure the saved model.
-      Found while writing docs/DESIGN.md (2026-11-01)
+- [x] Set Up captures faces in the sandboxed service (2026-11-08): root (the
+      settings helper, sudo kenning add) asks "enroll <user> <label>", the service
+      captures and saves the model it owns, so OpenCV never runs as root
+- [x] The service serves each connection in a thread (2026-11-08): a scan, or a
+      client that says nothing, no longer holds up everyone else; scans queue for
+      the camera, at most one per user
+- [x] Fingerprints as a choice of their own (2026-11-08), through fprintd, with
+      Kenning's rate limit and messages: the lock screen's Fingerprint method reads
+      the finger only when chosen (Plasma 6.8 runs kde-fingerprint unasked beside
+      every method; Kenning's waits on a prompt only the add-on answers), Kenning's
+      polkit dialog offers Password, Fingerprint and Face with a one-time token
+      for pam_kenning.so grant, and the login screen has a Use Fingerprint button.
+      On Fedora and Debian, kde and polkit-1 stop waiting for a finger before the
+      password
+- [x] A finger for sudo in the terminal (2026-11-11): after the face and before the
+      password, only at a terminal, with Ctrl+C on to the password. Kenning's polkit
+      dialog (also what run0 and pkexec show) keeps the button of a method that can't
+      be used right now, and says why
+- [ ] Upstream for fingerprints: a kscreenlocker option not to run kde-fingerprint
+      unasked (then the add-on's prompt can go), and methods in polkit-kde-agent-1
+      (then Kenning's dialog can go)
 - [ ] Measured recognition accuracy before any stronger security claim:
       false accepts and false rejects across cameras (IR and webcam), lighting,
       glasses, several people and attack types (photos, screens, look-alikes),

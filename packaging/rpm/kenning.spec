@@ -20,10 +20,13 @@ BuildRequires:  libarchive-devel
 BuildRequires:  kf6-kcmutils-devel
 BuildRequires:  kf6-kconfig-devel
 BuildRequires:  kf6-kcoreaddons-devel
+BuildRequires:  kf6-kdbusaddons-devel
 BuildRequires:  kf6-ki18n-devel
 BuildRequires:  kf6-kirigami-devel
+BuildRequires:  kf6-kwindowsystem-devel
 BuildRequires:  opencv-devel
 BuildRequires:  pam-devel
+BuildRequires:  polkit-qt6-1-devel
 BuildRequires:  qt6-qtbase-devel
 BuildRequires:  qt6-qtdeclarative-devel
 BuildRequires:  systemd-devel
@@ -37,6 +40,8 @@ Requires:       python3
 Requires:       qt6-qtdeclarative
 Requires:       systemd
 Recommends:     plasma-desktop
+# Fingerprints on the lock screen and in administrator prompts
+Recommends:     fprintd
 # Reads the setup steps aloud
 Recommends:     qt6-qtspeech
 Recommends:     speech-dispatcher
@@ -116,6 +121,8 @@ python3 -I /usr/lib/kenning/kenning-lockscreen.py || :
 %{_datadir}/dbus-1/system-services/org.kde.kcontrol.kcmkenning.service
 %{_datadir}/dbus-1/system.d/org.kde.kcontrol.kcmkenning.conf
 %{_datadir}/polkit-1/actions/org.kde.kcontrol.kcmkenning.policy
+%{_datadir}/polkit-1/rules.d/50-kenning.rules
+%{_userunitdir}/plasma-polkit-agent.service.d/kenning.conf
 %{_datadir}/applications/kcm_kenning.desktop
 
 %changelog

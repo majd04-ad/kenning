@@ -20,7 +20,7 @@ Sign in, unlock and approve with your face, on the login screen, the lock screen
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-dark.png">
-  <img src="docs/images/settings-light.png" alt="The Face Unlock page in System Settings" width="560">
+  <img src="docs/images/settings-light.png" alt="The Face &amp; Fingerprint page in System Settings" width="560">
 </picture>
 
 </div>
@@ -33,6 +33,7 @@ Sign in, unlock and approve with your face, on the login screen, the lock screen
 - **Easy setup.** System Settings shows you where to look and when to turn your head, and can read the steps aloud.
 - **Best with a face sign-in camera.** Many laptops have an infrared (IR) camera next to the normal one, made for face sign-in. Kenning uses it when it's there, because it works in the dark and is much harder to fool with a photo. An ordinary webcam works too, and Kenning tells you what that means for security.
 - **Fits in with Plasma.** On Plasma 6.8 it appears as Plasma's own Face sign-in option, next to fingerprint and password. You can change how the face scan animation looks, or install new designs.
+- **Fingerprint as a choice of its own.** With a fingerprint reader, Fingerprint becomes a button next to Password and Face on the lock screen and in administrator prompts, instead of a silent wait before the password. Kenning uses the reader through fprintd, so any reader fprintd supports works.
 - **Your face stays on your computer.** Kenning never connects to the network, and the saved face data can only be read by Kenning itself, not by other apps or other users. See [Privacy](#privacy).
 
 ## Install
@@ -106,7 +107,7 @@ Almost every computer is **amd64** (Fedora calls it **x86_64**). Only on a lapto
 
 ### 3. Set up your face
 
-1. Open **System Settings › Security & Privacy › Face Unlock**. If System Settings was already open, close it and open it again first.
+1. Open **System Settings › Security & Privacy › Face & Fingerprint**. If System Settings was already open, close it and open it again first.
 2. Press **Set Up…** and follow the steps: look at the camera, then turn your head when asked.
 
    <picture>
@@ -120,9 +121,21 @@ Almost every computer is **amd64** (Fedora calls it **x86_64**). Only on a lapto
 > Don't forget your password. You still need it after a restart to unlock KWallet, whenever your face isn't recognised, and if you ever remove Kenning.
 
 > [!CAUTION]
-> With face unlock on for `sudo` and administrator prompts, anyone who looks enough like you, or with a webcam, a photo of you, can approve changes to the system while sitting at your computer. If that worries you, untick **Administrator prompts** and **sudo in the terminal** in Face Unlock settings.
+> With face unlock on for `sudo` and administrator prompts, anyone who looks enough like you, or with a webcam, a photo of you, can approve changes to the system while sitting at your computer. If that worries you, untick **Administrator prompts** and **sudo in the terminal** in Face & Fingerprint settings.
 
 To have the steps read aloud, also install `speech-dispatcher` and `espeak-ng` from your software centre (Discover).
+
+### 4. Fingerprints (optional)
+
+With a fingerprint reader and `fprintd` installed:
+
+1. Set up your fingerprints in **System Settings › Users**, or press **Set Up…** next to **Your fingerprint** in Face & Fingerprint settings.
+2. In **Face & Fingerprint**, under **Use your fingerprint for**, tick where to use them: **Lock screen, as its own choice** (Plasma 6.8 or newer), **Administrator prompts** and **sudo in the terminal**.
+3. Press **Apply**. The lock screen then shows a **Fingerprint** button next to **Password**, and reads your finger only once you press it. Typing switches back to the password.
+
+Administrator prompts use Kenning's version of Plasma's dialog, with **Password**, **Fingerprint** and **Face** as buttons. It starts with the method chosen in **Start with** (Face by default; Fingerprint, or whichever you used last time, are the other choices), which the lock screen uses too. It takes over at your next login; to switch back to Plasma's dialog, untick **Administrator prompts: Use Kenning's dialog**. `run0` and `pkexec` ask through this dialog too. A method that can't be used right now (the camera is switched off, or too many fingers or faces weren't yours) keeps its button, and says why when you choose it.
+
+`sudo` has no buttons, so it goes in order: your face if that is on for `sudo`, then your finger, then your password. Press **Ctrl+C** while it waits for your finger to type your password at once. It only asks for a finger at a terminal, never when a script hands `sudo` the password.
 
 <details>
 <summary><b>Face unlock on the login screen (Arch Linux only, for now)</b></summary>
@@ -165,15 +178,16 @@ Your password keeps working throughout. To remove Kenning, run the line for your
 | Fedora | `sudo dnf remove kenning` |
 | Arch Linux | `sudo pacman -R kenning` |
 
-This also takes it off the lock screen and the sign-in prompts. To delete your saved face as well, do this first: open **System Settings › Face Unlock**, press **Manage…** and remove each saved look.
+This also takes it off the lock screen and the sign-in prompts. To delete your saved face as well, do this first: open **System Settings › Face & Fingerprint**, press **Manage…** and remove each saved look.
 
 ## Problems?
 
-- **Face unlock didn't recognise me.** Type your password instead; it always works. To improve recognition, press **Add Look…** in Face Unlock settings and set up again with glasses on or off, or in different lighting.
+- **Face unlock didn't recognise me.** Type your password instead; it always works. To improve recognition, press **Add Look…** in Face & Fingerprint settings and set up again with glasses on or off, or in different lighting.
 - **"Too dark or too bright".** Face the light instead of having it behind you, or turn on a lamp. Bright sunlight from behind or beside you can also cause this.
-- **Face Unlock isn't in System Settings.** Close System Settings and open it again. If it still isn't there, restart the computer.
+- **Face & Fingerprint isn't in System Settings.** Close System Settings and open it again. If it still isn't there, restart the computer.
 - **"No camera was found", or "The camera is off or in use".** Many laptops have a switch or a key (often **F6** or a slider beside the lens) that disconnects the camera; turn it on. Check that the camera works in another app, such as Kamoso, and then close that app: only one program can use the camera at a time. Face unlock works again as soon as the camera is back; nothing has to be set up again.
-- **It stopped working after reinstalling.** Open Face Unlock settings and press **Test**. The message says what is missing; `journalctl -b -u kenning` shows why each scan failed.
+- **The lock screen has no Face (or Fingerprint) button.** Each user chooses the lock screen's buttons. Open Face & Fingerprint settings, tick **Lock screen** under **Use your face for** (or **Lock screen, as its own choice** under **Use your fingerprint for**) and press **Apply**.
+- **It stopped working after reinstalling.** Open Face & Fingerprint settings and press **Test**. The message says what is missing; `journalctl -b -u kenning` shows why each scan failed.
 - **`systemctl enable kenning` says the unit has no installation config.** You don't need to enable anything. The package already sets the service to start with the computer, and it runs the first time it's needed. `systemctl status kenning.socket` shows it listening, even when it says "disabled".
 - **Anything else:** [open an issue](https://github.com/RishonDev/kenning/issues/new/choose). The form tells you what to include.
 
@@ -204,6 +218,8 @@ flowchart LR
         camera[IR camera] --> yunet["YuNet<br>finds the face"] --> sface["SFace<br>recognises it"]
     end
     daemon -. reads .-> models[("Face models<br>/etc/kenning/models")]
+    daemon -- system bus --> fprintd["fprintd<br>fingerprint reader"]
+    dialog["Kenning's polkit dialog"] -- "finger or face" --> daemon
 ```
 
 - **One service owns the camera and the face models**, like fprintd does for fingerprints. systemd starts it on demand, it runs as its own user, and it only answers for root or for the account being checked. The models are readable by nothing else.
@@ -213,6 +229,8 @@ flowchart LR
   - Kenning's lock screen service fails closed
   - face unlock stays off with the lid closed, and over SSH: a request that logind can't place in a local session is refused unless you're signed in at this computer
   - an ordinary webcam is never used to approve system changes unless you choose it
+  - fingerprints have the same limit, with their own count, and are only read when you choose Fingerprint
+- **Administrator prompts** go through Kenning's dialog. Choosing Fingerprint or Face asks the service, which, on a match, gives that dialog a one-time token for polkit's own check (`pam_kenning.so grant`). Choosing Password asks nothing of Kenning, so the password prompt never waits for a finger or a face.
 
 <details>
 <summary><b>Recognition and security settings</b></summary>
@@ -230,7 +248,7 @@ flowchart LR
 Kenning never connects to the network.
 
 - **The service can't reach the network at all.** Its systemd sandbox (`PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`) gives it no network devices and only local sockets, so the kernel would stop it even if its code tried. Check with `systemctl show kenning -p PrivateNetwork -p RestrictAddressFamilies`.
-- **Nothing else in Kenning has network code.** The PAM module only talks to the service through `/run/kenning.sock`, and themes are installed from a file on your computer.
+- **Nothing else in Kenning has network code.** The PAM module and the polkit dialog only talk to the service through `/run/kenning.sock`, the service talks to fprintd on the computer's own message bus, and themes are installed from a file on your computer.
 - **Your face is saved as numbers, not photos,** in `/etc/kenning/models`, readable only by the service. Kenning keeps no camera pictures.
 - **Backups may copy it.** If Timeshift, Snapper or another backup includes `/etc`, your face data goes wherever the backup goes.
 - **Installing downloads software, not your data:** Kenning itself and, when building, the two recognition networks from OpenCV and the Plasma Login Manager source.
@@ -241,7 +259,8 @@ Kenning never connects to the network.
 Face unlock is a convenience, not a stronger lock than your password. Before you rely on it:
 
 - **An ordinary webcam can be fooled by a photo or video of you.** Kenning has no liveness check. An IR camera is much harder to fool, since a printed photo or a screen looks different in infrared, but Kenning isn't a certified biometric system.
-- **People who look like you**, such as a twin or a close sibling, may be recognised as you. Moving **Match threshold** towards **Strict** helps (Face Unlock settings › **Recognition and security: Configure…**).
+- **Fingerprints for administrator prompts and `sudo`** approve changes to the system, like the password does. Kenning only offers it in its own dialog or at a terminal, and only for the account signed in at the computer, but anyone who can put your finger on the reader can approve with it.
+- **People who look like you**, such as a twin or a close sibling, may be recognised as you. Moving **Match threshold** towards **Strict** helps (Face & Fingerprint settings › **Recognition and security: Configure…**).
 - **Your password always works**, and it is still what protects your data. Face unlock doesn't change disk encryption, and signing in with your face doesn't unlock KWallet, which still needs your password.
 - **While you're signed in at the computer and over SSH at the same time**, a program started from the SSH login outside a session (for example with `systemd-run --user`) can still start a face scan, which the camera answers with whoever sits at the computer.
 - **After a restart, face unlock waits for your password** (or fingerprint) on the login screen. After that it works until the next restart, also after signing out. Automatic login counts as signing in, so with it on this protection is gone. You can turn this off in **Recognition and security**.
@@ -251,11 +270,11 @@ Found a security problem? Please report it privately, as [SECURITY.md](SECURITY.
 
 ### Plasma versions
 
-| Plasma | Lock screen |
-|---|---|
-| 6.8 and newer | Plasma's own Face sign-in method (PAM service `kde-face`, which Kenning provides) with the scan animation |
-| 6.3 to 6.7 | Face unlock before the password check, with the scan animation, unlocking without pressing Unlock |
-| Older, or unknown | The stock lock screen; look at the camera, then press Unlock |
+| Plasma | Lock screen | Fingerprint |
+|---|---|---|
+| 6.8 and newer | Plasma's own Face sign-in method (PAM service `kde-face`, which Kenning provides) with the scan animation | Its own button (`kde-fingerprint`, which Kenning replaces), read only when chosen |
+| 6.3 to 6.7 | Face unlock before the password check, with the scan animation, unlocking without pressing Unlock | Plasma's own |
+| Older, or unknown | The stock lock screen; look at the camera, then press Unlock | Plasma's own |
 
 Face unlock on the login screen needs `plasma-login-manager-kenning`, packaged for Arch Linux so far.
 
@@ -309,6 +328,7 @@ CI runs the same build, tests and style check on every push, plus shellcheck and
 | `engine/native/` | The `kenning` command (enrol, list, remove, test), the service (`kenning daemon`) and `pam_kenning.so` |
 | `autotests/` | Unit tests (QTest) for the engine, the service and the settings checks |
 | `kcm/` | The System Settings page, its KAuth helper (`src/auth`), the code they share (`src/common`) and the bundled themes |
+| `polkit-agent/` | Kenning's dialog for administrator prompts: Plasma's polkit-kde-agent-1, with Fingerprint and Face beside the password |
 | `lockscreen/` | The lock screen add-on, re-applied after Plasma updates and undone on removal |
 | `login-manager/` | Patches for Plasma Login Manager, one per version, and `apply.sh`, which picks the one that fits: scans as soon as the login screen appears |
 | `packaging/` | Arch, Debian and Fedora packaging, PAM tidying, and the first-login setup prompt |

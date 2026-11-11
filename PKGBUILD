@@ -15,8 +15,8 @@ makedepends=(cmake extra-cmake-modules meson ninja qt6-tools
              # plasma-login-manager
              kauth kcmutils kconfig kcoreaddons kdbusaddons ki18n kio kirigami kpackage kservice
              layer-shell-qt libkscreen libplasma libxau pam plasma-workspace qt6-5compat qt6-base qt6-declarative systemd-libs
-             # engine
-             opencv libarchive)
+             # engine, polkit dialog
+             opencv libarchive kwindowsystem polkit-qt6)
 source=(https://download.kde.org/stable/plasma/$_plmver/plasma-login-manager-$_plmver.tar.xz{,.sig}
         https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
         https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx)
@@ -46,9 +46,10 @@ build() {
 
 package_kenning() {
   pkgdesc='Kenning: face unlock for KDE Plasma'
-  depends=(kauth kcmutils kconfig kcoreaddons ki18n kirigami libplasma plasma-desktop qt6-base qt6-declarative
-           libarchive libnotify opencv pam python systemd-libs)
+  depends=(kauth kcmutils kconfig kcoreaddons kdbusaddons ki18n kirigami kwindowsystem libplasma plasma-desktop polkit-qt6
+           qt6-base qt6-declarative libarchive libnotify opencv pam python systemd-libs)
   optdepends=('plasma-login-manager-kenning: start face unlock as soon as the login screen appears'
+              'fprintd: fingerprints as a choice of their own on the lock screen and in administrator prompts'
               'qt6-speech: read the setup steps aloud'
               'speech-dispatcher: read the setup steps aloud (with a voice such as espeak-ng)')
   backup=(etc/kenning/config.ini)
