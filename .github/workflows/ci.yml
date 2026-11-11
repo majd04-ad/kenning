@@ -24,7 +24,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed git base-devel cmake ninja extra-cmake-modules clang \
               qt6-base qt6-declarative qt6-speech opencv pam systemd-libs \
-              kauth kcmutils kconfig kcoreaddons ki18n kirigami libplasma
+              kauth kcmutils kconfig kcoreaddons ki18n kirigami libplasma kdbusaddons kwindowsystem polkit-qt6
 
       - uses: actions/checkout@v5
 

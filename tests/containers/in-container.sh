@@ -25,23 +25,27 @@ debian | ubuntu)
         build-essential cmake extra-cmake-modules pkg-config gettext python3 \
         qt6-base-dev qt6-declarative-dev libopencv-dev libpam0g-dev libsystemd-dev libarchive-dev \
         libkf6auth-dev libkf6config-dev libkf6coreaddons-dev libkf6i18n-dev libkf6kcmutils-dev libkirigami-dev \
+        libkf6dbusaddons-dev libkf6windowsystem-dev libpolkit-qt6-1-dev \
         > /tmp/deps.log 2>&1
     ;;
 fedora)
     dnf install -y -q --setopt=install_weak_deps=False gcc-c++ cmake extra-cmake-modules pkgconf gettext python3 util-linux \
         qt6-qtbase-devel qt6-qtdeclarative-devel opencv-devel pam-devel systemd-devel libarchive-devel \
         kf6-kauth-devel kf6-kconfig-devel kf6-kcoreaddons-devel kf6-ki18n-devel kf6-kcmutils-devel kf6-kirigami-devel \
+        kf6-kdbusaddons-devel kf6-kwindowsystem-devel polkit-qt6-1-devel \
         > /tmp/deps.log 2>&1
     ;;
 opensuse-tumbleweed | opensuse*)
     zypper -n -q install -y --no-recommends gcc-c++ cmake kf6-extra-cmake-modules pkgconf gettext-tools python3 \
         qt6-base-devel qt6-declarative-devel opencv-devel pam-devel systemd-devel \
         kf6-kauth-devel kf6-kconfig-devel kf6-kcoreaddons-devel kf6-ki18n-devel kf6-kcmutils-devel kf6-kirigami-devel \
+        kf6-kdbusaddons-devel kf6-kwindowsystem-devel polkit-qt6-1-devel \
         > /tmp/deps.log 2>&1
     ;;
 arch)
     pacman -Syu --noconfirm --needed base-devel cmake extra-cmake-modules python \
         qt6-base qt6-declarative opencv pam systemd libarchive kauth kconfig kcoreaddons ki18n kcmutils kirigami \
+        kdbusaddons kwindowsystem polkit-qt6 \
         > /tmp/deps.log 2>&1
     ;;
 *)
