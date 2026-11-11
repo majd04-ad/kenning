@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Majd Abu Diab
+# SPDX-License-Identifier: CC0-1.0
+#
+# Kenning's polkit dialog in place of Plasma's: the same dialog, with Fingerprint and Face beside
+# the password. It starts Plasma's own when switched off in System Settings > Face & Fingerprint.
+[Service]
+ExecStart=
+ExecStart=@KENNING_LIBEXECDIR@/kenning-polkit-agent

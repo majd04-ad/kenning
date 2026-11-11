@@ -1,0 +1,12 @@
+<!--
+    SPDX-FileCopyrightText: 2026 Majd Abu Diab
+    SPDX-License-Identifier: CC0-1.0
+-->
+<RCC version="1.0">
+    <qresource>
+        <file>qml/QuickAuthDialog.qml</file>
+        <file alias="qml/FaceScanIndicator.qml">../kcm/src/ui/FaceScanIndicator.qml</file>
+        <file>qml/RejectPasswordAnimation.qml</file>
+        <file>qml/RejectPasswordPathAnimation.qml</file>
+    </qresource>
+</RCC>

@@ -1,6 +1,7 @@
 /*  This file is part of the KDE project
     SPDX-FileCopyrightText: 2021 Aleix Pol Gonzalez <aleixpol@kde.org>
     SPDX-FileCopyrightText: 2023 Devin Lin <devin@kde.org>
+    SPDX-FileCopyrightText: 2026 Majd Abu Diab
 
     SPDX-License-Identifier: GPL-2.0-or-later
 */
@@ -35,10 +36,20 @@ public:
     void hide();
     void request(const QString &request, bool echo);
 
+    // Kenning: "password", "fingerprint" and "face", as available; the one in use; what it says.
+    void setMethods(const QStringList &methods);
+    void setMethod(const QString &method);
+    void setMethodStatus(const QString &status);
+    // The scan animation: 1 waiting, 2 recognized, 3 failed (FaceScanIndicator's states).
+    void setMethodState(int state);
+    int methodState() const;
+
 Q_SIGNALS:
     void okClicked();
     void rejected();
     void userSelected();
+    // The user chose another way to approve, or typed while the finger or face was asked for.
+    void methodSelected(const QString &method);
 
 private:
     QWindow *m_theDialog = nullptr;

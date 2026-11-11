@@ -19,3 +19,9 @@ SPDX-License-Identifier = "CC0-1.0"
 path = "login-manager/patches/*.patch"
 SPDX-FileCopyrightText = ["2026 Rishon Jonathan R", "KDE contributors"]
 SPDX-License-Identifier = "GPL-2.0-or-later AND LGPL-2.0-or-later"
+
+# Kenning's polkit dialog keeps polkit-kde-agent-1's D-Bus interface, which has no header there.
+[[annotations]]
+path = "polkit-agent/org.kde.Polkit1AuthAgent.xml"
+SPDX-FileCopyrightText = "KDE contributors"
+SPDX-License-Identifier = "GPL-2.0-or-later"

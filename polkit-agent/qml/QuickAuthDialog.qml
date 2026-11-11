@@ -1,6 +1,7 @@
 /*  This file is part of the KDE project
     SPDX-FileCopyrightText: 2021 Aleix Pol Gonzalez <aleixpol@kde.org>
     SPDX-FileCopyrightText: 2023 Devin Lin <devin@kde.org>
+    SPDX-FileCopyrightText: 2026 Majd Abu Diab
 
     SPDX-License-Identifier: GPL-2.0-or-later
 */
@@ -32,6 +33,31 @@ Kirigami.AbstractApplicationWindow {
 
     property bool waitingForAuthentication: false
 
+    // Kenning: the ways to approve ("password", "fingerprint", "face"), the one in use and what it says
+    property var methods: ["password"]
+    property string method: "password"
+    property string methodStatus
+    // The scan animation's state (1 waiting, 2 recognized, 3 failed) and its look, as on the lock screen
+    property int methodState: 1
+    property string animationStyle: "hello"
+    readonly property bool usingPassword: method === "password"
+    signal methodSelected(string method)
+
+    onUsingPasswordChanged: {
+        if (usingPassword) {
+            passwordField.forceActiveFocus();
+        } else {
+            methodPanel.forceActiveFocus();
+        }
+    }
+
+    function methodName(method) {
+        return method === "fingerprint" ? i18n("Fingerprint") : method === "face" ? i18n("Face") : i18n("Password");
+    }
+    function methodIcon(method) {
+        return method === "fingerprint" ? "fingerprint-symbolic" : method === "face" ? "edit-image-face-detect-symbolic" : "input-keyboard-symbolic";
+    }
+
     // passed in by QuickAuthDialog.cpp
     property string mainText
     property string subtitle
@@ -47,6 +73,9 @@ Kirigami.AbstractApplicationWindow {
     onSelectedIdentityChanged: userSelected()
 
     onAccept: {
+        if (!usingPassword) {
+            return;
+        }
         waitingForAuthentication = true;
         // disable password field while password is being checked
         if (passwordField.text !== "") {
@@ -91,14 +120,14 @@ Kirigami.AbstractApplicationWindow {
     onActiveChanged: {
         if (active) {
             // immediately focus on password field when window is focused
-            passwordField.forceActiveFocus();
+            (usingPassword ? passwordField : methodPanel).forceActiveFocus();
         }
     }
 
     onVisibleChanged: {
         if (visible) {
             // immediately focus on password field on load
-            passwordField.forceActiveFocus();
+            (usingPassword ? passwordField : methodPanel).forceActiveFocus();
         } else {
             // reject on close
             root.reject();
@@ -194,11 +223,64 @@ Kirigami.AbstractApplicationWindow {
                     visible: text.length !== 0
                 }
 
+                // Kenning: Password, Fingerprint and Face as separate choices, as on the lock screen
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: root.methods.length > 1
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Repeater {
+                        model: root.methods
+
+                        QQC2.Button {
+                            required property string modelData
+                            icon.name: root.methodIcon(modelData)
+                            text: root.methodName(modelData)
+                            checkable: true
+                            checked: root.method === modelData
+                            onClicked: {
+                                checked = Qt.binding(() => root.method === modelData);
+                                if (root.method !== modelData) {
+                                    root.methodSelected(modelData);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Kirigami.PasswordField {
                     id: passwordField
                     Layout.fillWidth: true
+                    visible: root.usingPassword
                     onAccepted: root.accept()
                     placeholderText: i18n("Password…")
+                }
+
+                // While the finger or face is asked for. Typing switches to the password, keeping the key.
+                FocusScope {
+                    id: methodPanel
+                    Layout.fillWidth: true
+                    implicitHeight: methodRow.implicitHeight
+                    visible: !root.usingPassword
+                    activeFocusOnTab: true
+
+                    Keys.onPressed: event => {
+                        if (event.text.length > 0 && event.text.trim().length > 0) {
+                            passwordField.text += event.text;
+                            root.methodSelected("password");
+                            event.accepted = true;
+                        }
+                    }
+
+                    FaceScanIndicator {
+                        id: methodRow
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        faceState: methodPanel.visible ? root.methodState : 0
+                        message: root.methodStatus
+                        method: root.method === "fingerprint" ? "fingerprint" : "face"
+                        style: root.animationStyle
+                    }
                 }
 
                 RowLayout {
@@ -221,6 +303,7 @@ Kirigami.AbstractApplicationWindow {
                     QQC2.Button {
                         text: i18n("OK")
                         icon.name: "dialog-ok"
+                        visible: root.usingPassword
                         onClicked: root.accept()
                     }
 
