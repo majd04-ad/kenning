@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: CC0-1.0
 [Desktop Entry]
 Type=Application
-Name=Face Unlock setup prompt
+Name=Face & Fingerprint setup prompt
 Comment=Offers to set up face unlock once, if this computer has an infrared camera
 Exec=/usr/lib/kenning/setup-prompt
 OnlyShowIn=KDE;

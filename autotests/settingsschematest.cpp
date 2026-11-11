@@ -26,6 +26,12 @@ private Q_SLOTS:
         QTest::newRow("certainty too lenient") << QStringLiteral("video/certainty") << QStringLiteral("11") << false;
         QTest::newRow("timeout, not a number") << QStringLiteral("video/timeout") << QStringLiteral("4s") << false;
         QTest::newRow("dark threshold") << QStringLiteral("video/dark_threshold") << QStringLiteral("100") << true;
+        QTest::newRow("fingerprint for administrator prompts") << QStringLiteral("polkit/fingerprint") << QStringLiteral("true") << true;
+        QTest::newRow("seconds to wait for a finger") << QStringLiteral("fingerprint/timeout") << QStringLiteral("30") << true;
+        QTest::newRow("seconds to wait for a finger, too short") << QStringLiteral("fingerprint/timeout") << QStringLiteral("2") << false;
+        QTest::newRow("fingerprint tries") << QStringLiteral("fingerprint/max_tries") << QStringLiteral("10") << true;
+        QTest::newRow("fingerprint tries, none") << QStringLiteral("fingerprint/max_tries") << QStringLiteral("0") << false;
+        QTest::newRow("face for administrator prompts, not a bool") << QStringLiteral("polkit/face") << QStringLiteral("1") << false;
     }
 
     void validatesEngineSettings()
@@ -52,6 +58,8 @@ private Q_SLOTS:
     {
         QVERIFY(!engineSetting(QStringLiteral("video/device_path")));
         QVERIFY(!systemSetting(QStringLiteral("core/disabled")));
+        QVERIFY(!engineSetting(QStringLiteral("fingerprint/device")));
+        QVERIFY(systemSetting(QStringLiteral("Polkit/Agent")));
     }
 
     void checksThemeIds_data()
@@ -81,6 +89,14 @@ private Q_SLOTS:
         QVERIFY(!isPamLine(QStringLiteral("auth sufficient pam_howdy.so")));
         QVERIFY(isFacePamLine(QStringLiteral("auth sufficient pam_howdy.so")));
         QVERIFY(!isFacePamLine(QStringLiteral("auth include system-login")));
+        // A finger for sudo and the polkit dialog's token aren't face unlock, and stay when it is switched off.
+        const QString finger = QStringLiteral("auth       sufficient                  pam_kenning.so fingerprint");
+        QVERIFY(!isPamLine(finger) && !isFacePamLine(finger) && isFingerprintPamLine(finger));
+        QVERIFY(isFingerprintPamLine(QStringLiteral("auth [success=done default=die] pam_kenning.so fingerprint explicit")));
+        QVERIFY(!isFingerprintPamLine(QStringLiteral("# auth sufficient pam_kenning.so fingerprint")));
+        QVERIFY(!isFingerprintPamLine(pamLine));
+        const QString grant = QStringLiteral("auth sufficient pam_kenning.so grant");
+        QVERIFY(!isPamLine(grant) && !isFacePamLine(grant) && !isFingerprintPamLine(grant));
     }
 
     void parsesLockScreenStatus()

@@ -391,6 +391,22 @@ ActionReply FaceUnlockHelper::save(const QVariantMap &args)
             return failure(QStringLiteral("Could not update %1").arg(service.path));
         }
     }
+    const auto pamTidy = [](const QString &part, bool on) {
+        return QProcess::execute(FaceUnlock::pamTidy, {part, on ? QStringLiteral("on") : QStringLiteral("off")}) == 0;
+    };
+    if (pam.contains(QStringLiteral("fingerprint")) && !pamTidy(QStringLiteral("fingerprint"), pam.value(QStringLiteral("fingerprint")).toBool())) {
+        return failure(QStringLiteral("Could not switch the lock screen's Fingerprint method"));
+    }
+    if (const QString key = QStringLiteral("sudo-fingerprint"); pam.contains(key) && !pamTidy(key, pam.value(key).toBool())) {
+        return failure(QStringLiteral("Could not update /etc/pam.d/sudo"));
+    }
+    // Administrator prompts take Kenning's token when either the finger or the face may give one.
+    if (accepted.contains(QStringLiteral("polkit/face")) || accepted.contains(QStringLiteral("polkit/fingerprint"))) {
+        const FaceUnlock::Config config(FaceUnlock::configPath);
+        if (!pamTidy(QStringLiteral("polkit"), config.boolean("polkit/face", false) || config.boolean("polkit/fingerprint", false))) {
+            return failure(QStringLiteral("Could not update /etc/pam.d/polkit-1"));
+        }
+    }
 
     const QVariantMap system = args.value(QStringLiteral("system")).toMap();
     if (!system.isEmpty()) {

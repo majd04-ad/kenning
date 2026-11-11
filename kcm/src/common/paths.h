@@ -35,6 +35,8 @@ inline QString modelPath(const QString &user)
 inline const QString engineBinary = QStringLiteral(KENNING_BINARY);
 inline const QString pamModulePath = QStringLiteral(KENNING_PAM_MODULE);
 inline const QString systemConfigPath = QStringLiteral("/etc/xdg/kenningrc");
+// Per user, over systemConfigPath: the method to start with ([Methods] Start)
+inline const QString userConfigName = QStringLiteral("kenningrc");
 inline const QString lockScreenPath = QStringLiteral("/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml");
 inline const QString lockScreenMarker = QStringLiteral("kenning lock screen patch");
 // An unpatched login manager would scan before checking a typed password.

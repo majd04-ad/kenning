@@ -45,9 +45,12 @@ const QString autoScan = QStringLiteral("LoginScreen/AutoScan");
 const QString welcomePause = QStringLiteral("LoginScreen/WelcomePause");
 const QString showButton = QStringLiteral("lock/faceUnlockShowButton");
 const QString unlockDelay = QStringLiteral("lock/unlockDelay");
-const QString preferredMethod = QStringLiteral("lock/preferredMethod");
-const QString useLastMethod = QStringLiteral("lock/useLastMethod");
+const QString startMethod = QStringLiteral("user/startMethod");
 const QString lockScreenFace = QStringLiteral("pam/lockscreen");
+const QString lockScreenFingerprint = QStringLiteral("pam/fingerprint");
+const QString sudoFingerprint = QStringLiteral("pam/sudo-fingerprint");
+const QString loginFingerprint = QStringLiteral("LoginScreen/Fingerprint");
+const QString polkitAgent = QStringLiteral("Polkit/Agent");
 const QString pamPrefix = QStringLiteral("pam/");
 }
 
@@ -61,14 +64,15 @@ QVariantMap readEngineConfig()
     return values;
 }
 
-bool pamUsesEngine(const QString &path)
+// Whether a PAM service has a line of the kind: FaceUnlock::isPamLine for face unlock.
+bool pamHasLine(const QString &path, bool (*kind)(const QString &))
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         return false;
     }
     const QStringList lines = QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'));
-    return std::any_of(lines.cbegin(), lines.cend(), FaceUnlock::isPamLine);
+    return std::any_of(lines.cbegin(), lines.cend(), kind);
 }
 
 KConfigGroup lockScreenGroup(const KSharedConfig::Ptr &config)
@@ -76,8 +80,13 @@ KConfigGroup lockScreenGroup(const KSharedConfig::Ptr &config)
     return config->group(QStringLiteral("Greeter")).group(QStringLiteral("LnF")).group(QStringLiteral("General"));
 }
 
-// Whether fprintd has a fingerprint of this user on any reader.
-bool hasFingerprint(const QString &user)
+struct FingerprintState {
+    bool reader = false;
+    bool enrolled = false;
+};
+
+// Whether fprintd has a reader, and a fingerprint of this user on one.
+FingerprintState fingerprintState(const QString &user)
 {
     constexpr int timeoutMs = 3000;
     const QString service = QStringLiteral("net.reactivated.Fprint");
@@ -88,16 +97,27 @@ bool hasFingerprint(const QString &user)
                                                                    QDBus::Block,
                                                                    timeoutMs);
     if (devices.type() != QDBusMessage::ReplyMessage || devices.arguments().isEmpty()) {
-        return false;
+        return {};
     }
     const auto paths = qdbus_cast<QList<QDBusObjectPath>>(devices.arguments().constFirst());
-    return std::any_of(paths.cbegin(), paths.cend(), [&](const QDBusObjectPath &path) {
+    const bool enrolled = std::any_of(paths.cbegin(), paths.cend(), [&](const QDBusObjectPath &path) {
         QDBusMessage call = QDBusMessage::createMethodCall(service, path.path(), service + QStringLiteral(".Device"), QStringLiteral("ListEnrolledFingers"));
         call << user;
         // No fingerprints is an error reply (NoEnrolledPrints), not an empty list.
         const QDBusMessage fingers = QDBusConnection::systemBus().call(call, QDBus::Block, timeoutMs);
         return fingers.type() == QDBusMessage::ReplyMessage && !fingers.arguments().isEmpty() && !fingers.arguments().constFirst().toStringList().isEmpty();
     });
+    return {.reader = !paths.isEmpty(), .enrolled = enrolled};
+}
+
+// "on" or "off" from pam-tidy, e.g. for "fingerprint status".
+bool pamTidyOn(const QString &part)
+{
+    constexpr int timeoutMs = 5000;
+    QProcess process;
+    process.start(FaceUnlock::pamTidy, {part, QStringLiteral("status")});
+    process.waitForFinished(timeoutMs);
+    return process.exitStatus() == QProcess::NormalExit && process.readAllStandardOutput().trimmed() == "on";
 }
 
 QVariant fromConfigText(const QVariant &defaultValue, const QString &text)
@@ -120,6 +140,17 @@ QString toConfigText(const QVariant &value)
         return value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
     }
     return value.toString();
+}
+
+// A remembered method that is switched off crashes the lock screen (https://bugs.kde.org/528042).
+void forgetRememberedMethod(const QString &method)
+{
+    auto state = KSharedConfig::openStateConfig(QStringLiteral("kscreenlockerrc"));
+    KConfigGroup greeter = state->group(QStringLiteral("Greeter"));
+    if (greeter.readEntry("Authenticator") == method) {
+        greeter.deleteEntry("Authenticator");
+        state->sync();
+    }
 }
 
 KAuth::ExecuteJob *helperJob(const QString &action, const QVariantMap &arguments = {}, int timeoutMs = -1)
@@ -157,14 +188,20 @@ QVariantMap FaceUnlockKcm::defaultSettings()
         {QStringLiteral("pam/login"), true},
         {Key::lockScreenFace, true},
         {QStringLiteral("pam/sudo"), true},
-        {QStringLiteral("pam/polkit"), false},
+        {QStringLiteral("polkit/face"), false},
+        {QStringLiteral("polkit/fingerprint"), false},
+        {Key::lockScreenFingerprint, false},
+        {Key::sudoFingerprint, false},
+        {Key::loginFingerprint, false},
+        {Key::polkitAgent, true},
         {Key::animationStyle, QStringLiteral("hello")},
         {Key::autoScan, true},
         {Key::welcomePause, 1000},
         {Key::showButton, false},
         {Key::unlockDelay, 500},
-        {Key::preferredMethod, QStringLiteral("face")},
-        {Key::useLastMethod, false},
+        {Key::startMethod, QStringLiteral("face")},
+        {QStringLiteral("fingerprint/timeout"), 30},
+        {QStringLiteral("fingerprint/max_tries"), 3},
     };
 }
 
@@ -193,16 +230,29 @@ void FaceUnlockKcm::load()
     m_previewPath = colourPath.isEmpty() ? m_devicePath : colourPath;
 
     for (const auto &service : FaceUnlock::pamServices()) {
-        settings.insert(Key::pamPrefix + service.id, pamUsesEngine(service.path));
+        settings.insert(Key::pamPrefix + service.id, pamHasLine(service.path, FaceUnlock::isPamLine));
     }
+    settings.insert(Key::sudoFingerprint, pamHasLine(QStringLiteral("/etc/pam.d/sudo"), FaceUnlock::isFingerprintPamLine));
     const FaceUnlock::LockScreenState lockScreen = FaceUnlock::lockScreenState();
     m_lockScreenFaceService = lockScreen.faceService;
     if (lockScreen.known) {
         settings.insert(Key::lockScreenFace, lockScreen.enabled);
     }
+    m_lockScreenFaceSystem = settings.value(Key::lockScreenFace).toBool();
+    m_lockScreenFingerprintSystem = pamTidyOn(QStringLiteral("fingerprint"));
+    // Plasma's Face and Fingerprint buttons are also each user's own choice ([Authenticators] in
+    // kscreenlockerrc). Without it the lock screen has no such button, whatever PAM is set up to
+    // do, so only both together count as on; ticking the box again sets the user's part.
+    const auto lockConfig = KSharedConfig::openConfig(QStringLiteral("kscreenlockerrc"));
+    lockConfig->reparseConfiguration();
+    const KConfigGroup authenticators = lockConfig->group(QStringLiteral("Authenticators"));
+    if (m_lockScreenFaceService) {
+        settings.insert(Key::lockScreenFace, m_lockScreenFaceSystem && authenticators.readEntry("Face", false));
+    }
+    settings.insert(Key::lockScreenFingerprint, m_lockScreenFingerprintSystem && authenticators.readEntry("Fingerprint", false));
 
     KConfig system(FaceUnlock::systemConfigPath, KConfig::SimpleConfig);
-    for (const QString &key : {Key::animationStyle, Key::autoScan, Key::welcomePause}) {
+    for (const QString &key : {Key::animationStyle, Key::autoScan, Key::welcomePause, Key::loginFingerprint, Key::polkitAgent}) {
         const auto setting = FaceUnlock::systemSetting(key);
         const QString text = system.group(setting->group).readEntry(setting->key, toConfigText(defaults.value(key)));
         settings.insert(key, fromConfigText(defaults.value(key), text));
@@ -211,10 +261,16 @@ void FaceUnlockKcm::load()
     const KConfigGroup lock = lockScreenGroup(KSharedConfig::openConfig(QStringLiteral("kscreenlockerrc")));
     settings.insert(Key::showButton, lock.readEntry("faceUnlockShowButton", false));
     settings.insert(Key::unlockDelay, lock.readEntry("unlockDelay", 500));
-    const QString preferred = lock.readEntry("preferredMethod", QString());
-    settings.insert(Key::preferredMethod, preferred == QLatin1String("fingerprint") ? preferred : QStringLiteral("face"));
-    settings.insert(Key::useLastMethod, lock.readEntry("useLastMethod", false));
-    m_fingerprintEnrolled = hasFingerprint(userName());
+    // Saved by this page from 0.9; before, the lock screen's own two settings held it.
+    const QString lockStart = lock.readEntry("useLastMethod", false)                   ? QStringLiteral("last")
+        : lock.readEntry("preferredMethod", QString()) == QLatin1String("fingerprint") ? QStringLiteral("fingerprint")
+                                                                                       : QStringLiteral("face");
+    const QString start = KSharedConfig::openConfig(FaceUnlock::userConfigName)->group(QStringLiteral("Methods")).readEntry("Start", lockStart);
+    const bool known = start == QLatin1String("face") || start == QLatin1String("fingerprint") || start == QLatin1String("last");
+    settings.insert(Key::startMethod, known ? start : lockStart);
+    const FingerprintState fingerprint = fingerprintState(userName());
+    m_fingerprintReader = fingerprint.reader;
+    m_fingerprintEnrolled = fingerprint.enrolled;
 
     m_settings = settings;
     m_loaded = settings;
@@ -234,6 +290,12 @@ void FaceUnlockKcm::save()
             continue;
         }
         const QString key = it.key();
+        // Already so for the system: only this user's lock screen buttons are missing, which
+        // needs no administrator.
+        if ((key == Key::lockScreenFace && m_lockScreenFaceService && it.value().toBool() == m_lockScreenFaceSystem)
+            || (key == Key::lockScreenFingerprint && it.value().toBool() == m_lockScreenFingerprintSystem)) {
+            continue;
+        }
         if (key.startsWith(Key::pamPrefix)) {
             pam.insert(key.mid(Key::pamPrefix.size()), it.value());
         } else if (FaceUnlock::systemSetting(key)) {
@@ -248,44 +310,72 @@ void FaceUnlockKcm::save()
     lock.writeEntry("faceUnlockShowButton", m_settings.value(Key::showButton).toBool());
     lock.writeEntry("unlockDelay", m_settings.value(Key::unlockDelay).toInt());
     lock.writeEntry("faceAnimation", m_settings.value(Key::animationStyle).toString());
-    // Plasma applies a preferred method only while there is a fingerprint to choose.
-    const QString preferred = m_settings.value(Key::preferredMethod).toString();
-    const bool useLast = m_settings.value(Key::useLastMethod).toBool();
-    lock.writeEntry("preferredMethod", m_fingerprintEnrolled ? preferred : QString());
+    // One choice for the lock screen and Kenning's polkit dialog. The lock screen reads only its
+    // own settings, so it gets a copy; it applies only while there is a fingerprint to choose.
+    const QString start = m_settings.value(Key::startMethod).toString();
+    KSharedConfig::openConfig(FaceUnlock::userConfigName)->group(QStringLiteral("Methods")).writeEntry("Start", start);
+    KSharedConfig::openConfig(FaceUnlock::userConfigName)->sync();
+    const bool useLast = start == QLatin1String("last");
+    const QString preferred = start == QLatin1String("fingerprint") ? start : QStringLiteral("face");
+    lock.writeEntry("preferredMethod", m_fingerprintEnrolled ? preferred : QStringLiteral("face"));
     lock.writeEntry("useLastMethod", useLast);
     if (m_fingerprintEnrolled && !useLast && preferred == QLatin1String("fingerprint")) {
         // Plasma only offers fingerprint as a method of its own when this is on.
         config->group(QStringLiteral("Authenticators")).writeEntry("Fingerprint", true);
     }
-    if (m_lockScreenFaceService) {
-        const bool face = m_settings.value(Key::lockScreenFace).toBool();
-        config->group(QStringLiteral("Authenticators")).writeEntry("Face", face);
-        if (!face) {
-            // A remembered method that is switched off crashes the lock screen (https://bugs.kde.org/528042).
-            auto state = KSharedConfig::openStateConfig(QStringLiteral("kscreenlockerrc"));
-            KConfigGroup greeter = state->group(QStringLiteral("Greeter"));
-            if (greeter.readEntry("Authenticator") == QLatin1String("Face")) {
-                greeter.deleteEntry("Authenticator");
-                state->sync();
-            }
-        }
-    }
     config->sync();
 
+    // The lock screen's Fingerprint and Face buttons follow the PAM services the helper switches,
+    // so only once it has: not when its password prompt was cancelled.
+    const bool fingerprintMethod = m_settings.value(Key::lockScreenFingerprint).toBool();
+    const bool fingerprintChanged = fingerprintMethod != m_loaded.value(Key::lockScreenFingerprint).toBool();
+    const bool face = m_settings.value(Key::lockScreenFace).toBool();
+    const bool faceService = m_lockScreenFaceService;
+    const auto applyLockScreenMethods = [fingerprintMethod, fingerprintChanged, face, faceService] {
+        auto config = KSharedConfig::openConfig(QStringLiteral("kscreenlockerrc"));
+        KConfigGroup authenticators = config->group(QStringLiteral("Authenticators"));
+        // Kenning's Fingerprint method is a button of its own; other users get it at their next login.
+        // Off is "not set", Plasma's default, rather than false: switched on again for the system
+        // later, also by reinstalling, the button then comes back by itself (setup-prompt), where
+        // a false would keep it away until this page is used again.
+        const auto offer = [&authenticators](const char *method, bool on) {
+            if (on) {
+                authenticators.writeEntry(method, true);
+            } else {
+                authenticators.deleteEntry(method);
+                forgetRememberedMethod(QString::fromLatin1(method));
+            }
+        };
+        if (fingerprintChanged) {
+            offer("Fingerprint", fingerprintMethod);
+        }
+        if (faceService) {
+            offer("Face", face);
+        }
+        config->sync();
+    };
+
     if (engine.isEmpty() && pam.isEmpty() && system.isEmpty()) {
-        m_loaded = m_settings;
-        updateState();
+        applyLockScreenMethods();
+        load();
         return;
     }
 
+    const bool agentChanged = system.contains(Key::polkitAgent);
     auto *job = helperJob(QStringLiteral("save"), {{QStringLiteral("engine"), engine}, {QStringLiteral("pam"), pam}, {QStringLiteral("system"), system}});
-    connect(job, &KJob::result, this, [this, job] {
+    connect(job, &KJob::result, this, [this, job, agentChanged, applyLockScreenMethods] {
         if (job->error()) {
             Q_EMIT errorOccurred(job->errorString());
             setNeedsSave(true);
-        } else {
-            load();
+            return;
         }
+        applyLockScreenMethods();
+        if (agentChanged) {
+            // Kenning's dialog or Plasma's, from now on rather than from the next login.
+            QProcess::startDetached(QStringLiteral("systemctl"),
+                                    {QStringLiteral("--user"), QStringLiteral("restart"), QStringLiteral("plasma-polkit-agent.service")});
+        }
+        load();
     });
     job->start();
 }
@@ -389,9 +479,25 @@ bool FaceUnlockKcm::loginScreenSupported() const
     return QFile::exists(FaceUnlock::loginManagerSupportPath);
 }
 
+bool FaceUnlockKcm::fingerprintReader() const
+{
+    return m_fingerprintReader;
+}
+
 bool FaceUnlockKcm::fingerprintEnrolled() const
 {
     return m_fingerprintEnrolled;
+}
+
+bool FaceUnlockKcm::fingerprintLockScreenSupported() const
+{
+    QFile file(FaceUnlock::lockScreenPath);
+    return file.open(QIODevice::ReadOnly) && file.readAll().contains("kenning-start-fingerprint");
+}
+
+void FaceUnlockKcm::manageFingerprints()
+{
+    QProcess::startDetached(QStringLiteral("systemsettings"), {QStringLiteral("kcm_users")});
 }
 
 void FaceUnlockKcm::refreshFaces()

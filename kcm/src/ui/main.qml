@@ -72,7 +72,7 @@ KCM.SimpleKCM {
     actions: [
         Kirigami.Action {
             displayComponent: QQC2.Switch {
-                text: i18nc("@option:check face unlock on/off", "Enabled")
+                text: i18nc("@option:check face unlock on/off", "Face unlock")
                 checked: root.faceUnlockOn
                 enabled: kcm.engineInstalled
                 onToggled: kcm.setValue("core/disabled", !checked)
@@ -126,12 +126,12 @@ KCM.SimpleKCM {
         }
         HeaderMessage {
             type: Kirigami.MessageType.Error
-            visible: kcm.colourCamera && (settings["pam/polkit"] || settings["pam/sudo"])
+            visible: kcm.colourCamera && (settings["polkit/face"] || settings["pam/sudo"])
             text: i18n("Your face can approve changes to the system, and this camera is an ordinary webcam: a photo or video of you could approve them too. Leave these on the password unless you accept that risk.")
         }
         HeaderMessage {
             type: Kirigami.MessageType.Warning
-            visible: kcm.colourCamera && !(settings["pam/polkit"] || settings["pam/sudo"])
+            visible: kcm.colourCamera && !(settings["polkit/face"] || settings["pam/sudo"])
             text: i18n("This is an ordinary webcam, not an infrared camera. It is less accurate, a photo or video of you may fool it, and it needs your face lit from the front.")
         }
         HeaderMessage {
@@ -211,7 +211,7 @@ KCM.SimpleKCM {
         }
 
         RowLayout {
-            Kirigami.FormData.label: i18n("Use for:")
+            Kirigami.FormData.label: i18n("Use your face for:")
             spacing: 0
             QQC2.CheckBox {
                 text: i18n("Login screen")
@@ -230,10 +230,18 @@ KCM.SimpleKCM {
             checked: settings["pam/lockscreen"]
             onToggled: kcm.setValue("pam/lockscreen", checked)
         }
-        QQC2.CheckBox {
-            text: i18n("Administrator prompts")
-            checked: settings["pam/polkit"]
-            onToggled: kcm.setValue("pam/polkit", checked)
+        RowLayout {
+            spacing: 0
+            QQC2.CheckBox {
+                text: i18n("Administrator prompts")
+                enabled: settings["Polkit/Agent"] || settings["polkit/face"]
+                checked: settings["polkit/face"]
+                onToggled: kcm.setValue("polkit/face", checked)
+            }
+            Kirigami.ContextualHelpButton {
+                visible: !settings["Polkit/Agent"]
+                toolTipText: i18n("Needs Kenning's dialog for administrator prompts, below.")
+            }
         }
         RowLayout {
             spacing: 0
@@ -244,6 +252,159 @@ KCM.SimpleKCM {
             }
             Kirigami.ContextualHelpButton {
                 toolTipText: i18n("With administrator prompts or sudo, your face can approve changes to the system, such as installing software. Someone who looks like you, or holds the computer up to your face, could do the same, and so could a harmful program running as you, while you are at the computer. Your password always works too.")
+            }
+        }
+
+        Item {
+            Kirigami.FormData.isSection: true
+        }
+
+        // Fingerprints are read by fprintd and set up in Users; Kenning decides where they can be used.
+        RowLayout {
+            Kirigami.FormData.label: i18n("Your fingerprint:")
+            spacing: Kirigami.Units.smallSpacing
+            QQC2.Label {
+                text: !kcm.fingerprintReader ? i18n("No fingerprint reader found")
+                    : kcm.fingerprintEnrolled ? i18n("Set up in Users") : i18n("Not set up yet")
+            }
+            QQC2.Button {
+                visible: kcm.fingerprintReader
+                icon.name: kcm.fingerprintEnrolled ? "configure" : "list-add"
+                text: kcm.fingerprintEnrolled ? i18nc("@action:button", "Manage…") : i18nc("@action:button", "Set Up…")
+                onClicked: kcm.manageFingerprints()
+            }
+            Kirigami.ContextualHelpButton {
+                visible: !kcm.fingerprintReader
+                toolTipText: i18n("Fingerprints are read by fprintd. Install it, check that it supports your reader (fprintd-list), and open this page again.")
+            }
+        }
+        RowLayout {
+            Kirigami.FormData.label: i18n("Use your fingerprint for:")
+            visible: kcm.fingerprintReader
+            spacing: 0
+            QQC2.CheckBox {
+                text: i18n("Lock screen, as its own choice")
+                enabled: kcm.fingerprintLockScreenSupported || settings["pam/fingerprint"]
+                checked: settings["pam/fingerprint"]
+                onToggled: kcm.setValue("pam/fingerprint", checked)
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: kcm.fingerprintLockScreenSupported
+                    ? i18n("The lock screen shows Fingerprint as a button next to Password and Face, and reads your finger only once you choose it. Without this, Plasma reads the reader quietly while you type your password.")
+                    : i18n("Needs Plasma 6.8 or newer, with Kenning's lock screen add-on applied.")
+            }
+        }
+        RowLayout {
+            visible: kcm.fingerprintReader
+            spacing: 0
+            QQC2.CheckBox {
+                text: i18n("Administrator prompts")
+                enabled: settings["Polkit/Agent"] || settings["polkit/fingerprint"]
+                checked: settings["polkit/fingerprint"]
+                onToggled: kcm.setValue("polkit/fingerprint", checked)
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: settings["Polkit/Agent"]
+                    ? i18n("Administrator prompts show Fingerprint as a button next to the password. Your fingerprint can then approve changes to the system, such as installing software.")
+                    : i18n("Needs Kenning's dialog for administrator prompts, below.")
+            }
+        }
+        RowLayout {
+            visible: kcm.fingerprintReader
+            spacing: 0
+            QQC2.CheckBox {
+                text: i18n("sudo in the terminal")
+                checked: settings["pam/sudo-fingerprint"]
+                onToggled: kcm.setValue("pam/sudo-fingerprint", checked)
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: settings["pam/sudo"]
+                    ? i18n("sudo looks for your face first, then asks for your finger, and takes your password after that. Press Ctrl+C while it waits for your finger to type your password at once. Your fingerprint can then approve changes to the system, such as installing software.")
+                    : i18n("sudo asks for your finger before your password. Press Ctrl+C while it waits to type your password at once. Your fingerprint can then approve changes to the system, such as installing software.")
+            }
+        }
+        RowLayout {
+            visible: kcm.fingerprintReader
+            spacing: 0
+            QQC2.CheckBox {
+                text: i18n("Login screen")
+                enabled: (kcm.loginScreenSupported && settings["pam/login"]) || settings["LoginScreen/Fingerprint"]
+                checked: settings["LoginScreen/Fingerprint"]
+                onToggled: kcm.setValue("LoginScreen/Fingerprint", checked)
+            }
+            Kirigami.ContextualHelpButton {
+                visible: !kcm.loginScreenSupported || !settings["pam/login"]
+                toolTipText: !kcm.loginScreenSupported
+                    ? i18n("Needs the Kenning version of Plasma Login Manager (plasma-login-manager-kenning).")
+                    : i18n("Uses the login screen's face unlock step, so switch on face unlock for the login screen first. The login screen then shows a Use Fingerprint button.")
+            }
+        }
+        QQC2.SpinBox {
+            Kirigami.FormData.label: i18n("Wait for a finger:")
+            visible: kcm.fingerprintReader
+            from: 5
+            to: 120
+            stepSize: 5
+            value: settings["fingerprint/timeout"]
+            textFromValue: (value, locale) => i18ncp("seconds", "%1 second", "%1 seconds", value)
+            valueFromText: (text, locale) => parseInt(text)
+            onValueModified: kcm.setValue("fingerprint/timeout", value)
+        }
+        RowLayout {
+            Kirigami.FormData.label: i18n("Tries:")
+            visible: kcm.fingerprintReader
+            spacing: 0
+            QQC2.SpinBox {
+                from: 1
+                to: 10
+                value: settings["fingerprint/max_tries"]
+                onValueModified: kcm.setValue("fingerprint/max_tries", value)
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Fingers that aren't recognized before Kenning asks for your password instead. A touch that was too short or off-centre doesn't count.")
+            }
+        }
+
+        Item {
+            visible: kcm.fingerprintReader
+            Kirigami.FormData.isSection: true
+        }
+
+        // Where face and fingerprint are both offered: the lock screen and administrator prompts.
+        RowLayout {
+            Kirigami.FormData.label: i18n("Start with:")
+            visible: kcm.fingerprintReader
+            spacing: 0
+            QQC2.ComboBox {
+                id: startMethod
+                readonly property var methods: ["face", "fingerprint", "last"]
+                model: [i18n("Face"), i18n("Fingerprint"), i18n("Whichever I used last time")]
+                currentIndex: Math.max(0, methods.indexOf(settings["user/startMethod"]))
+                onActivated: kcm.setValue("user/startMethod", methods[currentIndex])
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: startMethod.currentIndex === 2
+                    ? i18n("The lock screen and administrator prompts start with face or fingerprint, whichever you used there last time. Your password always works.")
+                    : startMethod.currentIndex === 1
+                    ? i18n("The lock screen and administrator prompts read your finger first. On the lock screen, if your finger isn't read in time, it looks for your face. Your password always works.")
+                    : i18n("The lock screen and administrator prompts look for your face first; choose Fingerprint or type your password instead at any time.")
+            }
+        }
+
+        Item {
+            Kirigami.FormData.isSection: true
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Administrator prompts:")
+            spacing: 0
+            QQC2.CheckBox {
+                text: i18n("Use Kenning's dialog")
+                checked: settings["Polkit/Agent"]
+                onToggled: kcm.setValue("Polkit/Agent", checked)
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("Plasma's dialog for administrator prompts, with Fingerprint and Face as buttons next to the password. It starts with the method chosen in Start with. Without it, administrator prompts only take your password.")
             }
         }
 
@@ -279,31 +440,6 @@ KCM.SimpleKCM {
             onValueModified: kcm.setValue("lock/unlockDelay", value)
         }
 
-        RowLayout {
-            Kirigami.FormData.label: i18n("Start with:")
-            visible: kcm.fingerprintEnrolled
-            spacing: 0
-            QQC2.ComboBox {
-                id: preferredMethod
-                enabled: settings["pam/lockscreen"] && kcm.lockScreenPatched && !useLastMethod.checked
-                model: [i18n("Face"), i18n("Fingerprint")]
-                currentIndex: settings["lock/preferredMethod"] === "fingerprint" ? 1 : 0
-                onActivated: kcm.setValue("lock/preferredMethod", currentIndex === 1 ? "fingerprint" : "face")
-            }
-            Kirigami.ContextualHelpButton {
-                toolTipText: useLastMethod.checked ? i18n("The lock screen starts with face or fingerprint, whichever unlocked it last time. Your password always works.")
-                    : preferredMethod.currentIndex === 1 ? i18n("If your fingerprint isn't read in time, the lock screen looks for your face. Your password always works.")
-                    : i18n("If your face isn't recognized, use your fingerprint or password.")
-            }
-        }
-        QQC2.CheckBox {
-            id: useLastMethod
-            visible: kcm.fingerprintEnrolled
-            enabled: settings["pam/lockscreen"] && kcm.lockScreenPatched
-            text: i18n("Whichever I used last time")
-            checked: settings["lock/useLastMethod"]
-            onToggled: kcm.setValue("lock/useLastMethod", checked)
-        }
 
         Item {
             visible: kcm.loginScreenSupported

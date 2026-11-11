@@ -26,7 +26,11 @@ bool isBoolText(const QString &value);
 bool isThemeId(const QString &id);
 
 inline const QString pamLine = QStringLiteral("auth       sufficient                  pam_kenning.so");
+// pam_kenning.so as face unlock: not its lines for a finger ("fingerprint") or for the polkit
+// dialog's token ("grant").
 bool isPamLine(const QString &line);
+// pam_kenning.so asking for a finger, as pam-tidy sudo-fingerprint writes it.
+bool isFingerprintPamLine(const QString &line);
 // pam_kenning or a leftover pam_howdy; both are removed so only one engine runs.
 bool isFacePamLine(const QString &line);
 
@@ -34,5 +38,8 @@ struct PamService {
     QString id; // as in the settings page's "pam/<id>"
     QString path;
 };
+// Face unlock in front of the password. Administrator prompts (polkit-1), the lock screen's
+// Fingerprint method and a finger for sudo are pam-tidy's: "polkit", "fingerprint" and
+// "sudo-fingerprint".
 QList<PamService> pamServices();
 }

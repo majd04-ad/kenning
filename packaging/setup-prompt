@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # At the first login after startup, offers to set up face unlock when there is an IR camera
-# and no face model. Also switches on Plasma's Face sign-in method for users with a face model.
+# and no face model. Also switches on Plasma's Face and Fingerprint sign-in methods for users with
+# a face model or a fingerprint, when Kenning provides them.
 
 import fcntl
 import getpass
@@ -46,19 +47,25 @@ def has_ir_camera() -> bool:
     return False
 
 
-def has_face_model(user: str) -> bool | None:
-    """Asks the face unlock service (face models are root-only); None if it can't be reached.
-    A user locked out after too many failed attempts (14) has a model too, and so does one
-    whose camera is switched off (17)."""
+def ask_service(command: str, user: str) -> str | None:
+    """The Kenning service's answer code, or None if it can't be reached."""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as service:
             service.settimeout(5)
             service.connect("/run/kenning.sock")
-            service.sendall(f"has-model {user}\n".encode())
-            reply = service.recv(16).decode().strip()
+            service.sendall(f"{command} {user}\n".encode())
+            reply = service.recv(64).decode().strip()
     except (OSError, UnicodeDecodeError):
         return None
-    return reply in ("0", "14", "17")
+    return reply.split()[0] if reply else None
+
+
+def has_face_model(user: str) -> bool | None:
+    """Asks the face unlock service (face models are root-only); None if it can't be reached.
+    A user locked out after too many failed attempts (14) has a model too, and so does one
+    whose camera is switched off (17)."""
+    reply = ask_service("has-model", user)
+    return None if reply is None else reply in ("0", "14", "17")
 
 
 def enable_face_method() -> None:
@@ -79,9 +86,50 @@ def enable_face_method() -> None:
         pass
 
 
+def enable_fingerprint_method() -> None:
+    """Fingerprint=true in the user's kscreenlockerrc when Kenning's Fingerprint method is on,
+    Fingerprint isn't set either way and the user has a fingerprint."""
+    try:
+        status = subprocess.run(["/usr/lib/kenning/pam-tidy", "fingerprint", "status"],
+                                capture_output=True, text=True, timeout=10).stdout.strip()
+        if status != "on":
+            return
+        fingerprint = subprocess.run(["kreadconfig6", "--file", "kscreenlockerrc", "--group", "Authenticators",
+                                      "--key", "Fingerprint"], capture_output=True, text=True, timeout=10).stdout.strip()
+        if fingerprint or ask_service("has-fingerprint", getpass.getuser()) not in ("0", "14"):
+            return
+        subprocess.run(["kwriteconfig6", "--file", "kscreenlockerrc", "--group", "Authenticators", "--key", "Fingerprint",
+                        "true"], timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def forget_stale_choices(state: str) -> None:
+    """Once per user: earlier versions of the settings page wrote Face=false and Fingerprint=false
+    into kscreenlockerrc whenever a method was off for the whole system. Left there, they keep the
+    lock screen's buttons away after the method is on again, such as after reinstalling. Later
+    choices are kept: the settings page now leaves "off" unset."""
+    marker = os.path.join(state, "lockscreen-choices-reset")
+    if os.path.exists(marker):
+        return
+    try:
+        for method in ("Face", "Fingerprint"):
+            value = subprocess.run(["kreadconfig6", "--file", "kscreenlockerrc", "--group", "Authenticators", "--key", method],
+                                   capture_output=True, text=True, timeout=10).stdout.strip()
+            if value == "false":
+                subprocess.run(["kwriteconfig6", "--file", "kscreenlockerrc", "--group", "Authenticators", "--key", method,
+                                "--delete"], timeout=10)
+        os.makedirs(state, exist_ok=True)
+        open(marker, "w").close()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def main() -> int:
-    enable_face_method()
     state = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "kenning")
+    forget_stale_choices(state)
+    enable_face_method()
+    enable_fingerprint_method()
     marker = os.path.join(state, "setup-prompted")
     if os.path.exists(marker):
         return 0
@@ -107,7 +155,7 @@ def main() -> int:
     time.sleep(15)
     done()
     result = subprocess.run(
-        ["notify-send", "--app-name=Face Unlock", "--icon=user-identity", "--action=setup=Set Up",
+        ["notify-send", "--app-name=Face & Fingerprint", "--icon=user-identity", "--action=setup=Set Up",
          "Sign in with your face",
          "This computer has an infrared camera that can recognize you on the login and lock screens."],
         capture_output=True, text=True)

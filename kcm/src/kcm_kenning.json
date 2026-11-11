@@ -6,11 +6,11 @@
                 "Name": "Rishon Jonathan R"
             }
         ],
-        "Description": "Sign in and unlock with your face",
+        "Description": "Sign in, unlock and approve with your face or fingerprint",
         "Icon": "user-identity",
-        "Name": "Face Unlock"
+        "Name": "Face & Fingerprint"
     },
-    "X-KDE-Keywords": "face,hello,camera,unlock,login,biometric,recognition",
+    "X-KDE-Keywords": "face,fingerprint,finger,biometrics,biometric,hello,camera,reader,unlock,login,lock screen,polkit,recognition,kenning",
     "X-KDE-System-Settings-Parent-Category": "security-privacy",
     "X-KDE-Weight": 60
 }
