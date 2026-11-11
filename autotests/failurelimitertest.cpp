@@ -42,6 +42,20 @@ private Q_SLOTS:
         QVERIFY(limiter.isEmpty(start + 10min));
     }
 
+    // A scan that was waiting for the camera while another locked the user out still counts,
+    // but must not end a lockout longer than the window early.
+    void aFailureDuringALockoutKeepsIt()
+    {
+        FailureLimiter limiter;
+        const FailureLimits longLockout{.maxFailures = 3, .window = 15min, .lockout = 60min};
+        for (int i = 0; i < longLockout.maxFailures; ++i) {
+            limiter.recordFailure(user, longLockout, start);
+        }
+        limiter.recordFailure(user, longLockout, start + 1min);
+        QVERIFY(limiter.isLockedOut(user, longLockout, start + 30min));
+        QVERIFY(!limiter.isLockedOut(user, longLockout, start + 60min));
+    }
+
     void forgetsFailuresOutsideTheWindow()
     {
         FailureLimiter limiter;

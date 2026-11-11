@@ -40,7 +40,8 @@ bool FailureLimiter::recordFailure(uid_t uid, const FailureLimits &limits, Clock
         return time + limits.window <= now;
     });
     record.failures.push_back(now);
-    record.forgetAfter = now + limits.window;
+    // Never sooner than a lockout still running: a scan that waited for the camera may end in one.
+    record.forgetAfter = std::max(record.forgetAfter, now + limits.window);
     if (int(record.failures.size()) < limits.maxFailures) {
         return false;
     }

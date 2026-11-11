@@ -19,11 +19,13 @@
 #include <iostream>
 #include <iterator>
 #include <mutex>
+#include <optional>
 #include <poll.h>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <systemd/sd-login.h>
 #include <thread>
+#include <vector>
 
 namespace FaceUnlock
 {
@@ -74,6 +76,21 @@ std::optional<Request> receiveRequest(int client)
         received += size_t(count);
     }
     return parseRequest(std::string_view(buffer, received));
+}
+
+// The user's uid. getpwnam_r: each connection has a thread, and getpwnam's answer is shared by all.
+std::optional<uid_t> userId(const std::string &user)
+{
+    if (user.find('/') != std::string::npos) {
+        return std::nullopt;
+    }
+    passwd entry{};
+    passwd *found = nullptr;
+    std::vector<char> buffer(16 * 1024);
+    while (getpwnam_r(user.c_str(), &entry, buffer.data(), buffer.size(), &found) == ERANGE && buffer.size() < 1024 * 1024) {
+        buffer.resize(buffer.size() * 2);
+    }
+    return found ? std::optional(found->pw_uid) : std::nullopt;
 }
 
 // A local login of this user: the login screen refuses face unlock until there is one,
@@ -152,22 +169,23 @@ public:
         if (!request) {
             return reply(client, Aborted);
         }
-        const passwd *account = request->user.find('/') == std::string::npos ? getpwnam(request->user.c_str()) : nullptr;
+        const std::optional<uid_t> account = userId(request->user);
         if (!account) {
             return reply(client, Aborted);
         }
+        const uid_t uid = *account;
         // Set Up, through the settings helper or sudo kenning add: an administrator already agreed.
         if (request->command == "enroll") {
             return reply(client, peer.uid == 0 ? enrollFace(client, request->user, request->argument) : Aborted);
         }
-        const bool needsPassword = Config().boolean("core/password_after_boot", true) && !signedInSinceBoot(account->pw_uid);
+        const bool needsPassword = Config().boolean("core/password_after_boot", true) && !signedInSinceBoot(uid);
         // Asked by the login screen so it can skip the face scan after a restart. Open to anyone:
         // who has signed in since boot is public already (last, loginctl).
         if (request->command == "password-first") {
             return reply(client, needsPassword ? NeedsPassword : Recognized);
         }
         // Only root, or the user asking about their own face.
-        if (peer.uid != 0 && peer.uid != account->pw_uid) {
+        if (peer.uid != 0 && peer.uid != uid) {
             return reply(client, Aborted);
         }
 
@@ -175,10 +193,10 @@ public:
             return reply(client, NeedsPassword);
         }
         if (request->command == "has-model") {
-            return reply(client, hasModel(request->user, account->pw_uid));
+            return reply(client, hasModel(request->user, uid));
         }
         if (request->command == "compare") {
-            return reply(client, compareFace(client, request->user, account->pw_uid));
+            return reply(client, compareFace(client, request->user, uid));
         }
         reply(client, Aborted);
     }
@@ -210,7 +228,9 @@ private:
 
     int hasModel(const std::string &user, uid_t uid)
     {
-        if (!std::filesystem::exists(modelPath(user))) {
+        // Without the error code, a models directory the service can't read throws and ends the service.
+        std::error_code error;
+        if (!std::filesystem::exists(modelPath(user), error)) {
             return NoModel;
         }
         const std::lock_guard lock(m_state);
@@ -232,6 +252,10 @@ private:
         const std::optional<TurnQueue::Turn> turn = m_camera.take(uid, hungUp);
         if (!turn) {
             return Aborted;
+        }
+        // Another request may have locked the user out while this one waited.
+        if (isLockedOut(uid, limits)) {
+            return LockedOut;
         }
         // A broken install must answer "failed", so PAM falls back to the password.
         try {
