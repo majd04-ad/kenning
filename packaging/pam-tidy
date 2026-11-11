@@ -6,21 +6,32 @@
 #   pam-tidy tidy | migrate | remove
 #   pam-tidy settings <old config.ini>      (carries an earlier config.ini's settings into the installed one)
 #   pam-tidy lockscreen on | off | status   (Plasma 6.8+: its kde-face service; older: the kde service)
+#   pam-tidy fingerprint on | off | status  (the lock screen's Fingerprint method, kde-fingerprint)
+#   pam-tidy polkit on | off | status       (finger and face in Kenning's administrator prompt dialog)
+#   pam-tidy sudo-fingerprint on | off | status   (a finger in front of sudo's password)
 set -eu
 
 pam_dir=${PAM_DIR:-/etc/pam.d}
 vendor_pam_dir=${VENDOR_PAM_DIR:-/usr/lib/pam.d}
 kenning_dir=${KENNING_DIR:-/etc/kenning}
 face_line='auth       sufficient                  pam_kenning.so'
+grant_line='auth       sufficient                  pam_kenning.so grant'
+finger_line='auth       sufficient                  pam_kenning.so fingerprint'
 lockscreen_dir=${LOCKSCREEN_DIR:-/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen}
 face_service=$pam_dir/kde-face
 face_marker='# kenning: kde-fingerprint with pam_kenning.so in place of pam_fprintd.so; removed with Kenning'
+fingerprint_file=$pam_dir/kde-fingerprint
+fingerprint_marker='# kenning: fingerprints through Kenning, only when Fingerprint is chosen; removed with Kenning'
+# The distribution's own PAM files that Kenning replaced, put back when it is done with them
+originals=${KENNING_PAM_ORIGINALS:-/var/lib/kenning/pam-originals}
 
-# PAM files using a module on a non-comment line. Never kde-face, which is only written or removed whole.
+# PAM files using a module on a non-comment line. Never kde-face or Kenning's kde-fingerprint,
+# which are only written or removed whole.
 files_using() {
     local file
     for file in "$pam_dir"/*; do
         [[ -f $file && ! -L $file && $file != "$face_service" ]] || continue
+        [[ $file == "$fingerprint_file" ]] && fingerprint_ours && continue
         awk -v m="$1" 'index($0, m) && $0 !~ /^[[:space:]]*#/ { found = 1 } END { exit !found }' "$file" && echo "$file"
     done
     return 0
@@ -49,6 +60,260 @@ drop() {
 
 uses() { # file module
     [[ -f $1 ]] && awk -v m="$2" 'index($0, m) && $0 !~ /^[[:space:]]*#/ { found = 1 } END { exit !found }' "$1"
+}
+
+# pam_kenning.so as face unlock: not its lines for a finger or for the polkit dialog's token.
+uses_face() { # file
+    [[ -f $1 ]] && awk '$0 !~ /^[[:space:]]*#/ && /pam_kenning\.so/ && !/pam_kenning\.so[[:space:]]+(grant|fingerprint)/ { found = 1 } END { exit !found }' "$1"
+}
+
+uses_finger() { # file
+    [[ -f $1 ]] && grep -Eq '^[^#]*pam_kenning\.so[[:space:]]+fingerprint' "$1"
+}
+
+# Adds face unlock in front of a service's password check.
+add_to() { # service
+    local file=$pam_dir/$1
+    if [[ ! -e $file ]]; then
+        [[ -e $vendor_pam_dir/$1 ]] || return 0
+        cp "$vendor_pam_dir/$1" "$file"
+    fi
+    uses_face "$file" && return 0
+    rewrite "$file" -v line="$face_line" '!done && /^[[:space:]]*auth/ { print line; done = 1 } { print }'
+    echo "  kenning: face unlock switched on in $file"
+}
+
+# Where the distribution adds pam_fprintd.so to a stack the password service includes (Fedora's
+# system-auth, Debian's common-auth), the password prompt waits for a finger first. Kenning's
+# copies of kde and polkit-1 inline their includes without it: fingerprints are a choice of their
+# own there. So does its copy of sudo, where Kenning asks for the finger itself. The
+# distribution's files are kept in $originals and put back when Kenning is done.
+inlined_marker='# kenning: includes inlined without pam_fprintd.so, as fingerprints are a choice of their own; put back when Kenning is removed'
+
+# awk: a line that uses pam_kenning.so
+kenning_line='$0 !~ /^[[:space:]]*#/ && /pam_kenning\.so/'
+
+# Prints the second file with the lines of the first in front of its first auth line.
+in_front_of_auth='
+    NR == FNR { lines = lines $0 "\n"; next }
+    !done && /^[[:space:]]*-?auth/ { printf "%s", lines; done = 1 }
+    { print }'
+
+# Prints a PAM file with its includes inlined: all of an @include, a type's lines for
+# "<type> include". A substack keeps its own scope, so one that reaches pam_fprintd.so fails.
+inline_includes() { # file
+    awk -v pam_dir="$pam_dir" -v vendor="$vendor_pam_dir" '
+        function path(name) { return (system("test -f \"" pam_dir "/" name "\"") == 0) ? pam_dir "/" name : vendor "/" name }
+        function emit(file, only, depth,    line, rest, type, control, target) {
+            if (depth > 8) { failed = 1; return }
+            while ((getline line < file) > 0) {
+                rest = line
+                sub(/^[[:space:]]+/, "", rest)
+                if (rest == "" || rest ~ /^#/) { if (depth == 0) print line; continue }
+                if (rest ~ /^@include[[:space:]]/) { split(rest, words, /[[:space:]]+/); emit(path(words[2]), only, depth + 1); continue }
+                type = rest; sub(/[[:space:]].*/, "", type); sub(/^-/, "", type)
+                if (only != "" && type != only) continue
+                control = rest; sub(/^-?[a-z]+[[:space:]]+/, "", control)
+                if (control ~ /^(include|substack)[[:space:]]/) {
+                    split(control, words, /[[:space:]]+/)
+                    if (words[1] == "substack") {
+                        if (reaches_fprintd(path(words[2]), type)) failed = 1
+                        print line
+                    } else {
+                        emit(path(words[2]), type, depth + 1)
+                    }
+                    continue
+                }
+                print line
+            }
+            close(file)
+        }
+        function reaches_fprintd(file, only,    command, found) {
+            command = "awk \"/pam_fprintd\\.so/ && !/^[[:space:]]*#/\" \"" file "\""
+            found = (command | getline) > 0
+            close(command)
+            return found
+        }
+        BEGIN { emit(ARGV[1], "", 0); exit failed }' "$1"
+}
+
+# Drops pam_fprintd.so lines, shortening [...=N] jumps that went over them.
+without_fprintd() {
+    awk '
+        { lines[NR] = $0; gone[NR] = $0 !~ /^[[:space:]]*#/ && $0 ~ /pam_fprintd\.so/; module[NR] = $0 !~ /^[[:space:]]*(#|$)/ }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (gone[i]) continue
+                line = lines[i]
+                if (match(line, /\[[^]]*\]/)) {
+                    control = substr(line, RSTART, RLENGTH)
+                    out = ""
+                    while (match(control, /=[0-9]+/)) {
+                        jump = substr(control, RSTART + 1, RLENGTH - 1) + 0
+                        kept = 0
+                        seen = 0
+                        for (j = i + 1; j <= NR && seen < jump; j++) {
+                            if (!module[j]) continue
+                            seen++
+                            if (!gone[j]) kept++
+                        }
+                        out = out substr(control, 1, RSTART) (kept > 0 ? kept : "ok")
+                        control = substr(control, RSTART + RLENGTH)
+                    }
+                    line = substr(line, 1, index(line, "[") - 1) out control substr(line, index(line, "]") + 1)
+                }
+                print line
+            }
+        }'
+}
+
+# Writes Kenning's copy of a service whose stack reaches pam_fprintd.so, keeping the distribution's.
+inline_without_fprintd() { # service
+    local file=$pam_dir/$1 source flat
+    [[ -f $file ]] || [[ -f $vendor_pam_dir/$1 ]] || return 0
+    source=$file
+    [[ -f $originals/$1 ]] && source=$originals/$1
+    [[ -f $source ]] || source=$vendor_pam_dir/$1
+    flat=$(inline_includes "$source") || {
+        echo "  kenning: $1 reaches pam_fprintd.so through a substack; it may still wait for a finger before the password" >&2
+        return 0
+    }
+    grep -Eq '^[^#]*pam_fprintd\.so' <<< "$flat" || return 0
+    if [[ -f $file ]] && ! grep -qF "$inlined_marker" "$file" && [[ ! -e $originals/$1 ]]; then
+        mkdir -p "$originals"
+        cp -p "$file" "$originals/$1"
+    fi
+    # Kenning's own lines (face unlock, a finger, the polkit token) are the ones the service has
+    # now, in front of the rest; a kept file may hold older ones.
+    {
+        awk -v marker="$inlined_marker" 'NR == 1 && /^#%PAM/ { print; print marker; next } NR == 1 { print marker } { print }' <<< "$flat" |
+            awk "!($kenning_line)" | without_fprintd
+    } > "$file.kenning-new"
+    if [[ -f $file ]] && grep -Eq '^[^#]*pam_kenning\.so' "$file"; then
+        grep -E '^[^#]*pam_kenning\.so' "$file" > "$file.kenning-lines"
+        awk "$in_front_of_auth" "$file.kenning-lines" "$file.kenning-new" > "$file.kenning-new2"
+        mv "$file.kenning-new2" "$file.kenning-new"
+        rm "$file.kenning-lines"
+    fi
+    chmod 644 "$file.kenning-new"
+    if cmp -s "$file.kenning-new" "$file"; then
+        rm "$file.kenning-new"
+    else
+        mv "$file.kenning-new" "$file"
+        echo "  kenning: $file no longer waits for a finger before the password"
+    fi
+}
+
+# Puts the distribution's service back, with Kenning's own lines if it still wants them.
+restore_inlined() { # service [keep Kenning's lines]
+    local file=$pam_dir/$1
+    [[ -f $originals/$1 ]] && [[ -f $file ]] && grep -qF "$inlined_marker" "$file" || return 0
+    grep -E '^[^#]*pam_kenning\.so' "$file" > "$file.kenning-lines" || true
+    mv "$originals/$1" "$file"
+    # Kept as it was when Kenning took over, perhaps with face unlock on in it.
+    uses "$file" pam_kenning.so && rewrite "$file" "!($kenning_line)"
+    if [[ ${2:-} == keep && -s $file.kenning-lines ]]; then
+        rewrite "$file" "$in_front_of_auth" "$file.kenning-lines"
+    fi
+    rm -f "$file.kenning-lines"
+    echo "  kenning: put back the distribution's $file"
+}
+
+# sudo in a terminal: the finger after the face, which needs nothing from the user, and in front
+# of the password. pam_kenning.so asks only at a terminal, and Ctrl+C there goes on to the password.
+sudo_fingerprint() {
+    local file=$pam_dir/sudo
+    case "$1" in
+    on)
+        if [[ ! -e $file ]]; then
+            [[ -e $vendor_pam_dir/sudo ]] || {
+                echo "  kenning: no sudo PAM service to add the fingerprint to" >&2
+                return 1
+            }
+            cp "$vendor_pam_dir/sudo" "$file"
+        fi
+        inline_without_fprintd sudo
+        uses_finger "$file" && return 0
+        rewrite "$file" -v line="$finger_line" '
+            NR == FNR { if ($0 !~ /^[[:space:]]*#/ && /pam_kenning\.so/) last = FNR; next }
+            last && FNR == last { print; print line; next }
+            !last && !done && /^[[:space:]]*-?auth/ { print line; done = 1 }
+            { print }' "$file"
+        echo "  kenning: fingerprint for sudo switched on in $file"
+        ;;
+    off)
+        if uses_finger "$file"; then
+            rewrite "$file" '!($0 !~ /^[[:space:]]*#/ && /pam_kenning\.so[[:space:]]+fingerprint/)'
+            echo "  kenning: fingerprint for sudo switched off in $file"
+        fi
+        restore_inlined sudo keep
+        ;;
+    status)
+        uses_finger "$file" && echo "on" || echo "off"
+        ;;
+    *)
+        echo "usage: $0 sudo-fingerprint on|off|status" >&2
+        return 1
+        ;;
+    esac
+    return 0
+}
+
+# Administrator prompts: the line that takes a token from Kenning's polkit dialog. It passes at
+# once without one, so the password prompt never waits for it.
+polkit() {
+    local file=$pam_dir/polkit-1
+    case "$1" in
+    on)
+        if [[ ! -e $file ]]; then
+            [[ -e $vendor_pam_dir/polkit-1 ]] || return 1
+            cp "$vendor_pam_dir/polkit-1" "$file"
+        fi
+        inline_without_fprintd polkit-1
+        if ! grep -Eq '^[^#]*pam_kenning\.so[[:space:]]+grant' "$file"; then
+            uses "$file" pam_kenning.so && drop_from "$file" pam_kenning.so > /dev/null
+            rewrite "$file" -v line="$grant_line" '!done && /^[[:space:]]*-?auth/ { print line; done = 1 } { print }'
+            echo "  kenning: finger and face for administrator prompts switched on in $file"
+        fi
+        ;;
+    off)
+        restore_inlined polkit-1
+        uses "$file" pam_kenning.so && drop_from "$file" pam_kenning.so
+        ;;
+    status)
+        grep -Eq '^[^#]*pam_kenning\.so[[:space:]]+grant' "$file" 2> /dev/null && echo "on" || echo "off"
+        ;;
+    *)
+        echo "usage: $0 polkit on|off|status" >&2
+        return 1
+        ;;
+    esac
+    return 0
+}
+
+# Sets a key in config.ini, adding its section if needed.
+set_config() { # section key value
+    local config=$kenning_dir/config.ini
+    [[ -f $config ]] || return 0
+    rewrite "$config" -v section="[$1]" -v key="$2" -v value="$3" '
+        $0 == section { in_section = 1; print; next }
+        /^\[/ { if (in_section && !done) { print key " = " value; done = 1 } in_section = 0 }
+        in_section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" { print key " = " value; done = 1; next }
+        { print }
+        END { if (!done) { if (!in_section) print "\n" section; print key " = " value } }'
+}
+
+# Whether a key in config.ini is true.
+config_true() { # section key
+    awk -v section="[$1]" -v key="$2" '
+        { line = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line) }
+        line ~ /^\[.*\]$/ { in_section = (line == section); next }
+        in_section && line !~ /^[#;]/ && index(line, "=") {
+            name = substr(line, 1, index(line, "=") - 1); value = substr(line, index(line, "=") + 1)
+            gsub(/[[:space:]]/, "", name); gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            if (name == key) found = (value == "true")
+        }
+        END { exit !found }' "$kenning_dir/config.ini" 2> /dev/null
 }
 
 # Carries the settings of an earlier config.ini into the installed one: the values of the keys
@@ -80,30 +345,110 @@ carry_settings() { # old config
     echo "  kenning: kept the settings from $old"
 }
 
+# Where a finger or face may approve administrator prompts is a setting; PAM follows it. Its
+# line goes when Kenning is removed, and comes back with settings that were kept.
+sync_polkit() {
+    if config_true polkit face || config_true polkit fingerprint; then
+        [[ $(polkit status) == on ]] || polkit on
+    fi
+}
+
+# Before Kenning's polkit dialog, face unlock sat in front of the password in polkit-1. Keep it
+# on, as its own choice in the dialog.
+migrate_polkit() {
+    local file=$pam_dir/polkit-1
+    [[ -f $file ]] || return 0
+    awk '$0 !~ /^[[:space:]]*#/ && /pam_kenning\.so/ && !/pam_kenning\.so[[:space:]]+grant/ { found = 1 } END { exit !found }' "$file" || return 0
+    set_config polkit face true
+    polkit on
+    echo "  kenning: administrator prompts now offer face unlock as a choice in Kenning's dialog"
+}
+
 # pam_faillock makes a failed attempt wait two seconds. That slows password guessing; a face that
-# wasn't seen is no guess (the service has its own limit on those), and the wait only delays the
-# lock screen's way back to the password.
+# wasn't seen or a finger that wasn't placed is no guess (the service has its own limit on those),
+# and the wait only delays the lock screen's way back to the password.
 no_fail_delay='
     $0 !~ /^[[:space:]]*#/ && /pam_faillock\.so/ && /preauth/ && !/nodelay/ { sub(/[[:space:]]+$/, ""); $0 = $0 " nodelay" }'
 
-# Adds face unlock in front of a service's password check.
-add_to() { # service
-    local file=$pam_dir/$1
-    if [[ ! -e $file ]]; then
-        [[ -e $vendor_pam_dir/$1 ]] || return 0
-        cp "$vendor_pam_dir/$1" "$file"
-    fi
-    uses "$file" pam_kenning.so && return 0
-    rewrite "$file" -v line="$face_line" '!done && /^[[:space:]]*auth/ { print line; done = 1 } { print }'
-    echo "  kenning: face unlock switched on in $file"
-}
-
+# The distribution's kde-fingerprint, even while Kenning's replaces it.
 fingerprint_service() {
     local file
-    for file in "$pam_dir/kde-fingerprint" "$vendor_pam_dir/kde-fingerprint"; do
+    for file in "$originals/kde-fingerprint" "$pam_dir/kde-fingerprint" "$vendor_pam_dir/kde-fingerprint"; do
         [[ -f $file ]] && uses "$file" pam_fprintd.so && echo "$file" && return 0
     done
     return 1
+}
+
+fingerprint_ours() {
+    [[ -f $fingerprint_file ]] && grep -qF "$fingerprint_marker" "$fingerprint_file"
+}
+
+# Whether the lock screen add-on answers Kenning's fingerprint prompt; without it the Fingerprint
+# method would wait forever, so Plasma's own fingerprint service stays.
+fingerprint_capable() {
+    grep -q kenning-start-fingerprint "$lockscreen_dir/LockScreenUi.qml" 2> /dev/null
+}
+
+# Kenning's kde-fingerprint: the distribution's with pam_kenning.so in place of pam_fprintd.so,
+# failing closed. "explicit": the lock screen also runs this service unasked beside the password;
+# that run waits on a prompt nobody answers, so the reader is only used when Fingerprint is chosen.
+write_fingerprint_service() {
+    local stock
+    fingerprint_capable || {
+        echo "  kenning: the lock screen add-on isn't applied to this Plasma; Plasma's own fingerprint service stays" >&2
+        return 1
+    }
+    stock=$(fingerprint_service) || {
+        echo "  kenning: no kde-fingerprint PAM service with pam_fprintd.so to start from" >&2
+        return 1
+    }
+    if [[ -f $fingerprint_file ]] && ! fingerprint_ours && [[ ! -e $originals/kde-fingerprint ]]; then
+        mkdir -p "$originals"
+        cp -p "$fingerprint_file" "$originals/kde-fingerprint"
+        stock=$originals/kde-fingerprint
+    fi
+    awk -v marker="$fingerprint_marker" "$no_fail_delay"'
+        NR == 1 && /^#%PAM/ { print; print marker; next }
+        NR == 1 { print marker }
+        $0 !~ /^[[:space:]]*#/ && /pam_fprintd\.so/ {
+            print "auth       [success=done default=die]  pam_kenning.so fingerprint explicit"
+            print "auth       required                    pam_deny.so"
+            next
+        }
+        { print }' "$stock" > "$fingerprint_file.kenning-new"
+    chmod 644 "$fingerprint_file.kenning-new"
+    if cmp -s "$fingerprint_file.kenning-new" "$fingerprint_file"; then
+        rm "$fingerprint_file.kenning-new"
+    else
+        mv "$fingerprint_file.kenning-new" "$fingerprint_file"
+        echo "  kenning: wrote $fingerprint_file"
+    fi
+}
+
+remove_fingerprint_service() {
+    fingerprint_ours || return 0
+    if [[ -f $originals/kde-fingerprint ]]; then
+        mv "$originals/kde-fingerprint" "$fingerprint_file"
+        echo "  kenning: put back the distribution's $fingerprint_file"
+    else
+        rm "$fingerprint_file"
+        echo "  kenning: removed $fingerprint_file"
+    fi
+}
+
+fingerprint() {
+    case "$1" in
+    on) write_fingerprint_service && inline_without_fprintd kde ;;
+    off)
+        remove_fingerprint_service
+        restore_inlined kde keep
+        ;;
+    status) fingerprint_ours && echo "on" || echo "off" ;;
+    *)
+        echo "usage: $0 fingerprint on|off|status" >&2
+        return 1
+        ;;
+    esac
 }
 
 # Whether the lock screen has Plasma's own Face sign-in method (Plasma 6.8 and newer).
@@ -197,6 +542,17 @@ tidy_lockscreen() {
     fi
 }
 
+# Whether face unlock is on anywhere. The lines for the polkit dialog's token and for a finger
+# don't count: they say nothing about where the face is used.
+face_in_use() {
+    face_service_ours && return 0
+    local file
+    for file in $(files_using pam_kenning.so); do
+        uses_face "$file" && return 0
+    done
+    return 1
+}
+
 migrate() {
     local file service
     for file in $(files_using pam_faceunlock.so); do
@@ -204,7 +560,7 @@ migrate() {
         echo "  kenning: $file now uses pam_kenning.so"
     done
 
-    [[ -z $(files_using pam_kenning.so) ]] || return 0
+    face_in_use && return 0
     compgen -G "$kenning_dir/models/*.dat" > /dev/null || return 0
     # Same services as Set Up: an ordinary webcam stays off sudo.
     local services=(kde)
@@ -220,6 +576,25 @@ case "${1:-}" in
 tidy)
     [[ -e /usr/lib/security/pam_howdy.so ]] || drop pam_howdy.so
     tidy_lockscreen
+    migrate_polkit
+    sync_polkit
+    # Follow changes to the distribution's kde-fingerprint, or hand fingerprints back to Plasma
+    # when an update left the lock screen without the add-on.
+    if fingerprint_ours; then
+        if fingerprint_capable; then
+            write_fingerprint_service || true
+            inline_without_fprintd kde
+        else
+            remove_fingerprint_service
+            restore_inlined kde keep
+        fi
+    fi
+    if [[ -f $originals/polkit-1 ]]; then
+        inline_without_fprintd polkit-1
+    fi
+    if [[ -f $originals/sudo ]]; then
+        inline_without_fprintd sudo
+    fi
     ;;
 migrate)
     migrate
@@ -229,13 +604,27 @@ settings)
     ;;
 remove)
     remove_face_service
+    remove_fingerprint_service
+    restore_inlined kde
+    restore_inlined polkit-1
+    restore_inlined sudo
     drop pam_kenning.so
+    rmdir "$originals" "${originals%/*}" 2> /dev/null || true
     ;;
 lockscreen)
     lockscreen "${2:-}"
     ;;
+fingerprint)
+    fingerprint "${2:-}"
+    ;;
+polkit)
+    polkit "${2:-}"
+    ;;
+sudo-fingerprint)
+    sudo_fingerprint "${2:-}"
+    ;;
 *)
-    echo "usage: $0 tidy|migrate|remove|settings <old config.ini>|lockscreen on|off|status" >&2
+    echo "usage: $0 tidy|migrate|remove|settings <old config.ini>|lockscreen|fingerprint|polkit|sudo-fingerprint on|off|status" >&2
     exit 1
     ;;
 esac
