@@ -29,6 +29,7 @@ target_compile_definitions(kenning-config INTERFACE
 )
 
 add_library(kenning-engine STATIC
+    src/camera.h
     src/config.h
     src/engine.cpp src/engine.h
     src/facemodels.cpp src/facemodels.h

@@ -3,12 +3,14 @@
     SPDX-License-Identifier: GPL-2.0-or-later
 */
 #include "pipeline.h"
+#include "camera.h"
 
 #include <opencv2/imgproc.hpp>
 
 #include <future>
 #include <mutex>
 #include <optional>
+#include <thread>
 
 namespace FaceUnlock
 {
@@ -83,14 +85,20 @@ Pipeline::Pipeline(const Config &config)
     // Opening the camera wakes it from USB suspend (~250 ms); load the networks meanwhile.
     auto loading = std::async(std::launch::async, loadNetworks, detectionThreshold);
 
-    const std::string device = config.string("video/device_path");
+    const std::optional<Camera> camera = cameraFor(config);
     const auto start = Clock::now();
-    const bool opened = !device.empty() && device != "none" && m_camera.open(device, cv::CAP_V4L2);
+    bool opened = false;
+    try {
+        opened = camera && m_camera.open(camera->path, cv::CAP_V4L2);
+    } catch (const cv::Exception &) {
+        // As a camera that can't be opened; the networks' thread is still joined below.
+    }
     m_cameraMs = millisecondsSince(start);
     const Networks networks = loading.get();
     if (!opened) {
         return;
     }
+    m_device = camera->path;
     m_detector = networks.detector;
     m_recognizer = networks.recognizer;
     m_networksMs = networks.loadMs;
@@ -98,7 +106,7 @@ Pipeline::Pipeline(const Config &config)
     m_darkThreshold = config.number("video/dark_threshold", 60);
     m_rotate = int(config.number("video/rotate", 0));
     // Webcams keep colour: greyscale matched worse in tests.
-    m_colour = config.boolean("video/colour", false);
+    m_colour = camera->colour;
 }
 
 bool Pipeline::ready() const
@@ -109,6 +117,11 @@ bool Pipeline::ready() const
 bool Pipeline::colour() const
 {
     return m_colour;
+}
+
+const std::string &Pipeline::device() const
+{
+    return m_device;
 }
 
 double Pipeline::cameraMs() const
@@ -125,6 +138,8 @@ Pipeline::Frame Pipeline::read(cv::Mat &image)
 {
     cv::Mat frame;
     if (!m_camera.read(frame) || frame.empty()) {
+        // A camera that stopped answering fails at once: don't spin until the scan's deadline.
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
         return Frame::Missing;
     }
     cv::Mat grey;
