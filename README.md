@@ -172,7 +172,8 @@ This also takes it off the lock screen and the sign-in prompts. To delete your s
 - **Face unlock didn't recognise me.** Type your password instead; it always works. To improve recognition, press **Add Look…** in Face Unlock settings and set up again with glasses on or off, or in different lighting.
 - **"Too dark or too bright".** Face the light instead of having it behind you, or turn on a lamp. Bright sunlight from behind or beside you can also cause this.
 - **Face Unlock isn't in System Settings.** Close System Settings and open it again. If it still isn't there, restart the computer.
-- **"No camera was found".** Check that the camera works in another app, such as Kamoso, and that no other app is using it.
+- **"No camera was found", or "The camera is off or in use".** Many laptops have a switch or a key (often **F6** or a slider beside the lens) that disconnects the camera; turn it on. Check that the camera works in another app, such as Kamoso, and then close that app: only one program can use the camera at a time. Face unlock works again as soon as the camera is back; nothing has to be set up again.
+- **It stopped working after reinstalling.** Open Face Unlock settings and press **Test**. The message says what is missing; `journalctl -b -u kenning` shows why each scan failed.
 - **`systemctl enable kenning` says the unit has no installation config.** You don't need to enable anything. The package already sets the service to start with the computer, and it runs the first time it's needed. `systemctl status kenning.socket` shows it listening, even when it says "disabled".
 - **Anything else:** [open an issue](https://github.com/RishonDev/kenning/issues/new/choose). The form tells you what to include.
 
