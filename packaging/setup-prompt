@@ -48,7 +48,8 @@ def has_ir_camera() -> bool:
 
 def has_face_model(user: str) -> bool | None:
     """Asks the face unlock service (face models are root-only); None if it can't be reached.
-    A user locked out after too many failed attempts (14) has a model too."""
+    A user locked out after too many failed attempts (14) has a model too, and so does one
+    whose camera is switched off (17)."""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as service:
             service.settimeout(5)
@@ -57,7 +58,7 @@ def has_face_model(user: str) -> bool | None:
             reply = service.recv(16).decode().strip()
     except (OSError, UnicodeDecodeError):
         return None
-    return reply in ("0", "14")
+    return reply in ("0", "14", "17")
 
 
 def enable_face_method() -> None:

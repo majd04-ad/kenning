@@ -41,6 +41,16 @@ migrate_from_faceunlock() {
     /usr/lib/kenning/pam-tidy migrate
 }
 
+# Removing Kenning, or replacing it by another package of it (kenning-git, a fork's build),
+# makes pacman set an edited config.ini aside as config.ini.pacsave; the fresh one of the next
+# install knows no camera, and face unlock would fail until a new look is added. Bring the
+# settings back, for the face models that are still here.
+restore_settings() {
+    local saved=/etc/kenning/config.ini.pacsave
+    [[ -f $saved ]] || return 0
+    /usr/lib/kenning/pam-tidy settings "$saved" && rm -f "$saved"
+}
+
 # pacman reloads systemd only after the whole transaction; the socket is needed now.
 start_service() {
     systemctl daemon-reload 2>/dev/null || true
@@ -48,12 +58,17 @@ start_service() {
 }
 
 post_install() {
+    restore_settings
     /usr/lib/kenning/pam-tidy tidy
     secure_models
     migrate_from_faceunlock
     start_service
-    [[ -n $(find /etc/kenning/models -name '*.dat' 2>/dev/null) ]] ||
+    if [[ -n $(find /etc/kenning/models -name '*.dat' 2>/dev/null) ]]; then
+        echo "  Face unlock is on again for the faces saved before. Where it is used is in"
+        echo "  System Settings > Face Unlock."
+    else
         echo "  Open System Settings > Face Unlock and press Set Up to start using face unlock."
+    fi
 }
 
 post_upgrade() {
