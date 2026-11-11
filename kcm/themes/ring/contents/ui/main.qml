@@ -21,7 +21,10 @@ Item {
     property color successColor
     property color failureColor
     property color textColor
+    // Optional: "face" or "fingerprint", what is being read; hosts before 0.9 don't set it.
+    property string method: "face"
 
+    readonly property bool fingerprint: method === "fingerprint"
     readonly property bool scanning: faceState === 1
     readonly property bool recognized: faceState === 2
     readonly property bool failed: faceState === 3
@@ -130,6 +133,24 @@ Item {
                         ColorAnimation {
                             duration: Kirigami.Units.longDuration
                         }
+                    }
+                }
+            }
+
+            // What the ring waits for, when it is a finger
+            Kirigami.Icon {
+                anchors.centerIn: parent
+                width: parent.width * 0.5
+                height: width
+                visible: root.fingerprint
+                source: "fingerprint-symbolic"
+                color: root.accent
+                isMask: true
+                opacity: root.recognized ? 0 : 1
+
+                Behavior on opacity {
+                    NumberAnimation {
+                        duration: Kirigami.Units.longDuration
                     }
                 }
             }

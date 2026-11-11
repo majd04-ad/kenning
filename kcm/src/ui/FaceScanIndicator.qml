@@ -8,13 +8,15 @@ import QtQuick.Layouts
 
 import org.kde.kirigami as Kirigami
 
-// Face unlock progress for the login screen, the lock screen and the settings page; themes: see THEMES.md.
+// Face and fingerprint progress for the login screen, the lock screen, the polkit dialog and the settings page; themes: see THEMES.md.
 Item {
     id: root
 
     // 0 idle (hidden), 1 scanning, 2 recognized, 3 failed
     property int faceState: 0
     property string message
+    // "face" or "fingerprint": themes that know it draw a finger instead of a face
+    property string method: "face"
     property string style: "hello"
     property var themeDirs: ["file:///usr/local/share/kenning/themes/", "file:///usr/share/kenning/themes/"]
 
@@ -103,6 +105,12 @@ Item {
         when: loader.status === Loader.Ready
         property: "message"
         value: root.message
+    }
+    Binding {
+        target: loader.item
+        when: loader.status === Loader.Ready && "method" in loader.item
+        property: "method"
+        value: root.method
     }
     Binding {
         target: loader.item

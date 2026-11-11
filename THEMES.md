@@ -1,7 +1,8 @@
-# Face Unlock themes
+# Scan animation themes
 
-A theme draws the face scan animation on the login screen, the lock screen and
-in System Settings > Face Unlock. Themes are QML, like SDDM themes, so they run
+A theme draws the face scan animation on the login screen, the lock screen, in
+Kenning's polkit dialog and in System Settings > Face & Fingerprint. The same animation
+shows a fingerprint being read, if the theme draws one (see `method` below). Themes are QML, like SDDM themes, so they run
 on the login and lock screens: only install themes you trust.
 
 ## Layout
@@ -45,7 +46,11 @@ updates them as the scan progresses:
 | `failureColor` | color | Colour for failed |
 | `textColor` | color | Colour for the message |
 
-Declare each of them as a `property` in your root item. Set `implicitWidth` and
+Declare each of them as a `property` in your root item.
+
+A theme may also declare `property string method: "face"`. The host then sets it
+to `"fingerprint"` while it waits for a finger, so the theme can draw a fingerprint
+in place of a face. A theme without it shows its face animation for both. Set `implicitWidth` and
 `implicitHeight`: the host uses them for layout and hides the theme while
 `faceState` is 0. Show `message` somewhere, since it carries the reason a scan
 failed. You may import `QtQuick`, `QtQuick.Layouts`, `QtQuick.Shapes`,
@@ -57,7 +62,7 @@ complete examples.
 ## Installing
 
 Pack the theme folder (`tar czf my-theme.tar.gz my-theme`) and use **Install
-from File…** in System Settings > Face Unlock. Installed themes go to
+from File…** in System Settings > Face & Fingerprint. Installed themes go to
 `/usr/local/share/kenning/themes`; packaged ones live in
 `/usr/share/kenning/themes`. A theme in the first replaces a packaged theme
 with the same id.
