@@ -135,8 +135,8 @@ C
     mkdir -p /tmp/pamconf
     printf 'auth sufficient pam_kenning.so\nauth required pam_deny.so\n' > /tmp/pamconf/kenning-test
     sed -i 's/^disabled *=.*/disabled = false/' /etc/kenning/config.ini
-    # A dummy face model makes the module announce a scan, which proves PAM found it
-    # by name and it reached the service (the scan itself fails: no camera).
+    # A dummy face model makes the module answer for the service, which proves PAM found it
+    # by name and it reached the service: with no camera here, it says so instead of scanning.
     python3 -c "import json; print(json.dumps([{'id': 0, 'label': 'dummy', 'time': 0, 'data': [[0.0] * 128]}]))" > /etc/kenning/models/root.dat
     gcc -o /tmp/h /tmp/h.c -lpam 2> /dev/null
     # No login session here, as right after a restart.
@@ -147,7 +147,7 @@ C
     fi
     sed -i 's/^password_after_boot *=.*/password_after_boot = false/' /etc/kenning/config.ini
     out=$(/tmp/h root)
-    if grep -q "Attempting facial authentication" <<< "${out:-}"; then
+    if grep -Eq "Attempting facial authentication|camera not available" <<< "${out:-}"; then
         result "PAM module loads by name" PASS "$(grep message <<< "$out" | tail -1)"
     else
         result "PAM module loads by name" FAIL "${out:-harness failed}"

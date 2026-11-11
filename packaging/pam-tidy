@@ -4,6 +4,7 @@
 #
 # Keeps PAM pointing only at face modules that are installed. Run by the package:
 #   pam-tidy tidy | migrate | remove
+#   pam-tidy settings <old config.ini>      (carries an earlier config.ini's settings into the installed one)
 #   pam-tidy lockscreen on | off | status   (Plasma 6.8+: its kde-face service; older: the kde service)
 set -eu
 
@@ -50,6 +51,41 @@ uses() { # file module
     [[ -f $1 ]] && awk -v m="$2" 'index($0, m) && $0 !~ /^[[:space:]]*#/ { found = 1 } END { exit !found }' "$1"
 }
 
+# Carries the settings of an earlier config.ini into the installed one: the values of the keys
+# the installed one has, so its comments stay and newer keys keep their defaults. For a
+# config.ini the package manager set aside (pacman's config.ini.pacsave) when Kenning was
+# removed, or replaced by another package of it, and installed again: without this the camera
+# is forgotten, and face unlock fails until a new look is added.
+carry_settings() { # old config
+    local old=$1 config=$kenning_dir/config.ini
+    [[ -s $old && -f $config ]] || return 1
+    rewrite "$config" '
+        function trim(text) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", text); return text }
+        { line = trim($0) }
+        line ~ /^\[.*\]$/ { section = line }
+        FNR == NR {
+            if (line !~ /^[#;]/ && index(line, "=")) {
+                old[section "/" trim(substr(line, 1, index(line, "=") - 1))] = trim(substr(line, index(line, "=") + 1))
+            }
+            next
+        }
+        line !~ /^[#;]/ && index(line, "=") {
+            key = trim(substr(line, 1, index(line, "=") - 1))
+            if ((section "/" key) in old) {
+                print key " = " old[section "/" key]
+                next
+            }
+        }
+        { print }' "$old"
+    echo "  kenning: kept the settings from $old"
+}
+
+# pam_faillock makes a failed attempt wait two seconds. That slows password guessing; a face that
+# wasn't seen is no guess (the service has its own limit on those), and the wait only delays the
+# lock screen's way back to the password.
+no_fail_delay='
+    $0 !~ /^[[:space:]]*#/ && /pam_faillock\.so/ && /preauth/ && !/nodelay/ { sub(/[[:space:]]+$/, ""); $0 = $0 " nodelay" }'
+
 # Adds face unlock in front of a service's password check.
 add_to() { # service
     local file=$pam_dir/$1
@@ -91,7 +127,7 @@ write_face_service() {
         echo "  kenning: $face_service exists and isn't Kenning's; leaving it" >&2
         return 1
     fi
-    awk -v marker="$face_marker" '
+    awk -v marker="$face_marker" "$no_fail_delay"'
         NR == 1 && /^#%PAM/ { print; print marker; next }
         NR == 1 { print marker }
         $0 !~ /^[[:space:]]*#/ && /pam_fprintd\.so/ {
@@ -188,6 +224,9 @@ tidy)
 migrate)
     migrate
     ;;
+settings)
+    carry_settings "${2:?usage: $0 settings <old config.ini>}"
+    ;;
 remove)
     remove_face_service
     drop pam_kenning.so
@@ -196,7 +235,7 @@ lockscreen)
     lockscreen "${2:-}"
     ;;
 *)
-    echo "usage: $0 tidy|migrate|remove|lockscreen on|off|status" >&2
+    echo "usage: $0 tidy|migrate|remove|settings <old config.ini>|lockscreen on|off|status" >&2
     exit 1
     ;;
 esac
