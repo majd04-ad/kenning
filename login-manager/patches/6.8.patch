@@ -195,7 +195,7 @@ index f5ea2ab..5de5530 100644
          QTimer::singleShot(100, this, &MockGreeterProxy::loginSucceeded);
          QTimer::singleShot(800, []() {
 diff --git a/src/frontend/greeter/qml/GreeterState.qml b/src/frontend/greeter/qml/GreeterState.qml
-index f3233e1..b423f38 100644
+index f3233e1..7fceae1 100644
 --- a/src/frontend/greeter/qml/GreeterState.qml
 +++ b/src/frontend/greeter/qml/GreeterState.qml
 @@ -18,6 +18,13 @@ Item {
@@ -271,7 +271,7 @@ index f3233e1..b423f38 100644
  
          let sessionType = PlasmaLogin.SessionModel.data(PlasmaLogin.SessionModel.index(greeterState.sessionIndex, 0), PlasmaLogin.SessionModel.TypeRole)
          let sessionFileName = PlasmaLogin.SessionModel.data(PlasmaLogin.SessionModel.index(greeterState.sessionIndex, 0), PlasmaLogin.SessionModel.FileNameRole)
-@@ -218,10 +263,48 @@ Item {
+@@ -218,10 +263,54 @@ Item {
              PlasmaLogin.StateConfig.lastLoggedInUser = greeterState.lastLoggedInUser;
              setLastLoggedInSessionForUser(greeterState.lastLoggedInUser, greeterState.lastLoggedInSession);
              PlasmaLogin.StateConfig.save();
@@ -304,6 +304,12 @@ index f3233e1..b423f38 100644
 +                greeterState.faceMessage = i18nd("plasma_login", "Use your password once after a restart");
 +                greeterState.faceState = GreeterState.FaceState.Failed;
 +                greeterState.faceCanRetry = false;
++            } else if (message.includes("camera not available")) {
++                // Also said before any scan: switched off, unplugged or in use. Try Face Again
++                // works once the camera is back.
++                greeterState.faceMessage = i18nd("plasma_login", "The camera is off or in use");
++                greeterState.faceState = GreeterState.FaceState.Failed;
++                greeterState.faceCanRetry = true;
 +            } else if (greeterState.faceState === GreeterState.FaceState.Scanning && greeterState.isFaceMessage(message)) {
 +                if (/too (dark|bright)/.test(message)) {
 +                    greeterState.faceMessage = message.includes("too dark") ? i18nd("plasma_login", "Too dark to see you") : i18nd("plasma_login", "Too bright to see you");

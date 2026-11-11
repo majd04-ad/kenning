@@ -16,7 +16,7 @@ from pathlib import Path
 # VERSION changes whenever the edits do, so an older patch is redone from the saved original.
 MARKER = "kenning lock screen patch"
 LEGACY_MARKERS = ("lazysetup face unlock", "plasma-faceunlock lock screen patch")
-VERSION = "face unlock patch 14"
+VERSION = "face unlock patch 15"
 
 RESTORE = len(sys.argv) > 1 and sys.argv[1] == "--restore"
 if RESTORE:
@@ -173,6 +173,7 @@ UI_FUNCTION = ("""    property string pendingPassword
             faceRetryable = !msg.includes("too many attempts") && !msg.includes("no face model");
             faceMessage = msg.includes("too dark") ? i18nc("@info:status", "Too dark to see you")
                         : msg.includes("too bright") ? i18nc("@info:status", "Too bright to see you")
+                        : msg.includes("camera") ? i18nc("@info:status", "The camera is off or in use")
                         : msg.includes("too many attempts") ? i18nc("@info:status", "Too many attempts. Use your password.")
                         : msg.includes("no face model") ? i18nc("@info:status", "Face unlock isn't set up")
                         : i18nc("@info:status", "Couldn't recognize you");
