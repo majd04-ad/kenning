@@ -14,7 +14,7 @@ function(kenning_add_tests)
 endfunction()
 
 kenning_add_tests(
-    TESTS cameratest configtest servicetest signedintest turnqueuetest
+    TESTS cameratest configtest grantstoretest servicetest signedintest turnqueuetest
     LINK_LIBRARIES kenning-config Qt6::Core
 )
 kenning_add_tests(

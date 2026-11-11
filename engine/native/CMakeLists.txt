@@ -34,6 +34,7 @@ add_library(kenning-engine STATIC
     src/engine.cpp src/engine.h
     src/facemodels.cpp src/facemodels.h
     src/failurelimiter.cpp src/failurelimiter.h
+    src/grants.h
     src/headpose.cpp src/headpose.h
     src/pipeline.cpp src/pipeline.h
     src/service.h
@@ -43,7 +44,7 @@ add_library(kenning-engine STATIC
 target_link_libraries(kenning-engine PUBLIC ${OpenCV_LIBS} Qt6::Core kenning-config)
 target_include_directories(kenning-engine PUBLIC ${OpenCV_INCLUDE_DIRS})
 
-add_executable(kenning src/main.cpp src/daemon.cpp src/daemon.h)
+add_executable(kenning src/main.cpp src/daemon.cpp src/daemon.h src/fingerprint.cpp src/fingerprint.h)
 target_compile_definitions(kenning PRIVATE KENNING_VERSION="${PROJECT_VERSION}")
 target_link_libraries(kenning PRIVATE kenning-engine PkgConfig::LIBSYSTEMD)
 
@@ -61,4 +62,6 @@ configure_file(systemd/kenning.socket.in kenning.socket @ONLY)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/kenning.service ${CMAKE_CURRENT_BINARY_DIR}/kenning.socket
         DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system)
 install(FILES config.ini DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/kenning)
+configure_file(polkit/50-kenning.rules.in 50-kenning.rules @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/50-kenning.rules DESTINATION ${CMAKE_INSTALL_DATADIR}/polkit-1/rules.d)
 install(FILES models/LICENSE.yunet models/LICENSE.sface DESTINATION ${CMAKE_INSTALL_DATADIR}/kenning/models)

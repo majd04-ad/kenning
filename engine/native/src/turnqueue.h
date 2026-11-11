@@ -4,7 +4,7 @@
 */
 #pragma once
 
-// One device (the camera) for many requests: served in the order they
+// One device (the camera, the fingerprint reader) for many requests: served in the order they
 // came, and at most one waiting or running request per user, so nobody can fill the queue.
 // Root is trusted and not limited: the login manager and sudo ask as root.
 
@@ -56,12 +56,15 @@ public:
         uid_t m_uid;
     };
 
-    // Waits for this request's turn. Empty when the user already has a request waiting or
-    // running, or when cancelled() turned true while waiting.
-    std::optional<Turn> take(uid_t uid, const std::function<bool()> &cancelled = {})
+    // Waits for this request's turn. Empty when the user still has a request waiting or running
+    // after patience, or when cancelled() turned true while waiting. Patience covers a client
+    // that hung up and asked again before the service noticed.
+    std::optional<Turn> take(uid_t uid, const std::function<bool()> &cancelled = {}, std::chrono::milliseconds patience = {})
     {
         std::unique_lock lock(m_mutex);
-        if (uid != 0 && m_users[uid] > 0) {
+        if (uid != 0 && !m_changed.wait_for(lock, patience, [this, uid] {
+                return !m_users.contains(uid);
+            })) {
             return std::nullopt;
         }
         const std::uint64_t ticket = m_nextTicket++;
