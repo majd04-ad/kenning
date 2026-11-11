@@ -10,10 +10,15 @@
 #include <QVariantMap>
 
 // settings is one flat map that QML edits through setValue():
-//   "core/…", "video/…"                  /etc/kenning/config.ini (helper)
+//   "core/…", "video/…", "polkit/…"      /etc/kenning/config.ini (helper)
 //   "pam/<service>"                      pam_kenning.so in /etc/pam.d (helper)
-//   "Appearance/…", "LoginScreen/…"      /etc/xdg/kenningrc (helper)
+//   "pam/fingerprint"                    the lock screen's Fingerprint method (helper, pam-tidy)
+//   "pam/lockscreen", "pam/fingerprint"  on only with this user's lock screen button as well
+//                                        (~/.config/kscreenlockerrc [Authenticators], written directly)
+//   "Appearance/…", "LoginScreen/…",
+//   "Polkit/…"                           /etc/xdg/kenningrc (helper)
 //   "lock/…"                             ~/.config/kscreenlockerrc (written directly)
+//   "user/startMethod"                   ~/.config/kenningrc [Methods] Start, copied to kscreenlockerrc
 class FaceUnlockKcm : public KQuickConfigModule
 {
     Q_OBJECT
@@ -32,8 +37,11 @@ class FaceUnlockKcm : public KQuickConfigModule
     Q_PROPERTY(bool engineInstalled READ engineInstalled CONSTANT)
     Q_PROPERTY(bool lockScreenPatched READ lockScreenPatched CONSTANT)
     Q_PROPERTY(bool loginScreenSupported READ loginScreenSupported CONSTANT)
-    // fprintd has a fingerprint of this user
+    // fprintd has a reader, and a fingerprint of this user
+    Q_PROPERTY(bool fingerprintReader READ fingerprintReader NOTIFY settingsChanged)
     Q_PROPERTY(bool fingerprintEnrolled READ fingerprintEnrolled NOTIFY settingsChanged)
+    // The lock screen add-on starts Kenning's Fingerprint method (Plasma 6.8 and newer)
+    Q_PROPERTY(bool fingerprintLockScreenSupported READ fingerprintLockScreenSupported CONSTANT)
 
 public:
     FaceUnlockKcm(QObject *parent, const KPluginMetaData &data);
@@ -51,7 +59,9 @@ public:
     bool engineInstalled() const;
     bool lockScreenPatched() const;
     bool loginScreenSupported() const;
+    bool fingerprintReader() const;
     bool fingerprintEnrolled() const;
+    bool fingerprintLockScreenSupported() const;
 
     Q_INVOKABLE void setValue(const QString &key, const QVariant &value);
     Q_INVOKABLE void addFace(const QString &label);
@@ -61,6 +71,8 @@ public:
     Q_INVOKABLE void refreshThemes();
     Q_INVOKABLE void installTheme(const QUrl &archive);
     Q_INVOKABLE void removeTheme(const QString &id);
+    // Fingerprints are set up in System Settings > Users.
+    Q_INVOKABLE void manageFingerprints();
 
 public Q_SLOTS:
     void load() override;
@@ -91,6 +103,10 @@ private:
     QString m_previewPath;
     bool m_colourCamera = false;
     bool m_cameraAway = false;
+    // What PAM is set up to do for everyone, apart from this user's lock screen buttons
+    bool m_lockScreenFaceSystem = false;
+    bool m_lockScreenFingerprintSystem = false;
+    bool m_fingerprintReader = false;
     bool m_fingerprintEnrolled = false;
     bool m_lockScreenFaceService = false;
     bool m_busy = false;
