@@ -4,11 +4,11 @@
 */
 #pragma once
 
-// The service (kenning daemon) owns the camera and the face models. One request per connection:
-// "<command> <user>[ <argument>]\n". The service may first send progress lines, "# <text>\n" to
-// show or "! <text>\n" as an error, and then answers "<ExitCode>[ <data>]\n". It answers only
-// for root or the user's own account; daemon.cpp has who may ask what. Header-only, for
-// pam_kenning.
+// The service (kenning daemon) owns the camera, the face models and the fingerprint reader's
+// answers. One request per connection: "<command> <user>[ <argument>]\n". The service may first
+// send progress lines, "# <text>\n" to show or "! <text>\n" as an error, and then answers
+// "<ExitCode>[ <data>]\n". It answers only for root or the user's own account; daemon.cpp has
+// who may ask what. Header-only, for pam_kenning.
 
 #include "config.h"
 
@@ -31,6 +31,10 @@ namespace FaceUnlock
 #endif
 inline constexpr const char *socketPath = KENNING_SOCKET;
 
+// What pam_kenning.so grant asks in polkit's PAM conversation; Kenning's polkit dialog answers
+// with the token the service gave it, other dialogs with nothing.
+inline constexpr const char *grantPrompt = "kenning-grant";
+
 // For has-model, which answers at once.
 inline constexpr int quickTimeoutSeconds = 5;
 
@@ -38,6 +42,12 @@ inline constexpr int quickTimeoutSeconds = 5;
 inline int scanTimeoutSeconds(const Config &config)
 {
     return int(config.number("video/timeout", 4)) * 2 + 10;
+}
+
+// For fingerprint: the reader waits for a finger for fingerprint/timeout seconds between lines.
+inline int fingerprintTimeoutSeconds(const Config &config)
+{
+    return int(config.number("fingerprint/timeout", 30)) + 10;
 }
 
 struct Request {
@@ -65,7 +75,7 @@ inline std::optional<Request> parseRequest(std::string_view text)
     return request;
 }
 
-// What the service answered: the code, and any data after it.
+// What the service answered: the code, and any data after it (a grant's token).
 struct Reply {
     int code = -1; // -1 when the service can't be reached or hung up
     std::string data;

@@ -8,6 +8,8 @@
 #include "camera.h"
 #include "engine.h"
 #include "failurelimiter.h"
+#include "fingerprint.h"
+#include "grants.h"
 #include "service.h"
 #include "signedin.h"
 #include "turnqueue.h"
@@ -41,6 +43,7 @@ constexpr std::size_t maxRequestLength = 255;
 constexpr int maxConnections = 32;
 // In /run like pam_faillock's records: kept across service restarts, cleared at reboot.
 constexpr const char *failuresPath = "/run/kenning/failures";
+constexpr const char *fingerprintFailuresPath = "/run/kenning/fingerprint-failures";
 constexpr const char *signedInPath = "/run/kenning/signed-in";
 
 void sendLine(int client, const std::string &line)
@@ -61,6 +64,30 @@ void say(int client, const std::string &text, MessageKind kind = MessageKind::In
     std::erase(line, '\n');
     sendLine(client, (kind == MessageKind::Info ? "# " : "! ") + line);
 }
+
+// A failure limiter whose records survive a restart of the service, until the next reboot.
+class KeptLimiter
+{
+public:
+    explicit KeptLimiter(const char *path)
+        : m_path(path)
+    {
+        std::ifstream file(m_path);
+        limiter.restore(std::string(std::istreambuf_iterator<char>(file), {}));
+    }
+
+    void save()
+    {
+        const std::string temporary = std::string(m_path) + ".new";
+        std::ofstream(temporary) << limiter.save();
+        std::rename(temporary.c_str(), m_path);
+    }
+
+    FailureLimiter limiter;
+
+private:
+    const char *m_path;
+};
 
 std::optional<Request> receiveRequest(int client)
 {
@@ -113,6 +140,31 @@ bool hasLocalLogin(uid_t uid)
     return found;
 }
 
+// A local, active session of this user, such as the desktop they are sitting at.
+bool hasLocalSession(uid_t uid)
+{
+    char *session = nullptr;
+    if (sd_uid_get_display(uid, &session) < 0 || !session) {
+        return false;
+    }
+    const bool local = sd_session_is_remote(session) == 0 && sd_session_is_active(session) > 0;
+    std::free(session);
+    return local;
+}
+
+// The asking program runs at this computer: in a local session, or, outside any session (the
+// polkit dialog runs under the user's service manager), for a user signed in here.
+bool peerAtComputer(pid_t pid, uid_t uid)
+{
+    char *session = nullptr;
+    if (sd_pid_get_session(pid, &session) >= 0 && session) {
+        const bool local = sd_session_is_remote(session) == 0;
+        std::free(session);
+        return local;
+    }
+    return hasLocalSession(uid);
+}
+
 bool clientHungUp(int client)
 {
     pollfd state{client, POLLRDHUP, 0};
@@ -150,7 +202,6 @@ class Service
 public:
     Service()
     {
-        restoreFailures();
         std::ifstream file(signedInPath);
         m_signedIn.restore(std::string(std::istreambuf_iterator<char>(file), {}));
     }
@@ -185,16 +236,46 @@ public:
         if (request->command == "password-first") {
             return reply(client, needsPassword ? NeedsPassword : Recognized);
         }
+        // polkit's helper, through pam_kenning.so grant.
+        if (request->command == "has-grant" || request->command == "use-grant") {
+            if (peer.uid != 0) {
+                return reply(client, Aborted);
+            }
+            const std::lock_guard lock(m_state);
+            const auto now = GrantStore::Clock::now();
+            if (request->command == "has-grant") {
+                return reply(client, m_grants.pending(uid, now) ? Recognized : NoModel);
+            }
+            return reply(client, m_grants.use(uid, request->argument, now) ? Recognized : Aborted);
+        }
+        // Kenning's polkit dialog, for the user's own account only.
+        if (request->command == "grant") {
+            if (peer.uid != uid) {
+                return reply(client, Aborted);
+            }
+            return grant(client, request->user, uid, peer.pid, request->argument, needsPassword);
+        }
+
         // Only root, or the user asking about their own face.
         if (peer.uid != 0 && peer.uid != uid) {
             return reply(client, Aborted);
         }
 
+        // Fingerprints don't wait for a password after a restart: the first sign-in may use one.
+        if (request->command == "has-fingerprint") {
+            return reply(client, hasFingerprint(request->user, uid));
+        }
+        if (request->command == "fingerprint") {
+            return reply(client, verifyFinger(client, request->user, uid));
+        }
+
+        if (request->command == "has-model") {
+            // Without a face model there is nothing a password would bring back.
+            const int model = hasModel(request->user, uid);
+            return reply(client, needsPassword && model != NoModel ? NeedsPassword : model);
+        }
         if (needsPassword) {
             return reply(client, NeedsPassword);
-        }
-        if (request->command == "has-model") {
-            return reply(client, hasModel(request->user, uid));
         }
         if (request->command == "compare") {
             return reply(client, compareFace(client, request->user, uid));
@@ -206,7 +287,8 @@ public:
     {
         // Exiting would forget failed attempts and lockouts.
         const std::lock_guard lock(m_state);
-        return m_failures.isEmpty(FailureLimiter::Clock::now());
+        const auto now = FailureLimiter::Clock::now();
+        return m_failures.limiter.isEmpty(now) && m_fingerprintFailures.limiter.isEmpty(now) && m_grants.isEmpty(GrantStore::Clock::now());
     }
 
 private:
@@ -237,7 +319,7 @@ private:
         const Config config;
         {
             const std::lock_guard lock(m_state);
-            if (m_failures.isLockedOut(uid, FailureLimits::fromConfig(config), FailureLimiter::Clock::now())) {
+            if (m_failures.limiter.isLockedOut(uid, FailureLimits::fromConfig(config), FailureLimiter::Clock::now())) {
                 return LockedOut;
             }
         }
@@ -256,8 +338,10 @@ private:
         const auto hungUp = [client] {
             return clientHungUp(client);
         };
-        // One scan at a time; a user whose request is already waiting can't add another.
-        const std::optional<TurnQueue::Turn> turn = m_camera.take(uid, hungUp);
+        // One scan at a time; a user whose request is already waiting can't add another. The
+        // patience covers a scan that was just cancelled, e.g. switching methods in the polkit dialog.
+        constexpr auto patience = std::chrono::seconds(1);
+        const std::optional<TurnQueue::Turn> turn = m_camera.take(uid, hungUp, patience);
         if (!turn) {
             return Aborted;
         }
@@ -294,6 +378,43 @@ private:
             std::cerr << "; camera " << (cameraConfigured(config) ? config.string("video/device_path") : std::string("not set up, and no IR camera found"));
         }
         std::cerr << ")" << std::endl;
+    }
+
+    // A finger or face for an administrator prompt, answered "0 <token>" on a match.
+    void grant(int client, const std::string &user, uid_t uid, pid_t pid, const std::string &method, bool needsPassword)
+    {
+        const Config config;
+        if ((method != "face" && method != "fingerprint") || !config.boolean("polkit/" + method, false)) {
+            return reply(client, Aborted);
+        }
+        // As for sudo: the camera and the reader answer for whoever is at this computer.
+        if (config.boolean("core/abort_if_ssh", true) && !peerAtComputer(pid, uid)) {
+            return reply(client, Aborted);
+        }
+        int code = Aborted;
+        if (method == "fingerprint") {
+            code = verifyFinger(client, user, uid);
+        } else if (config.boolean("core/disabled", false)) {
+            code = Aborted;
+        } else if (needsPassword) {
+            code = NeedsPassword;
+        } else if (const int model = hasModel(user, uid); model != Recognized) {
+            code = model;
+        } else {
+            code = compareFace(client, user, uid);
+        }
+        if (code != Recognized) {
+            return reply(client, code);
+        }
+        std::string token;
+        {
+            const std::lock_guard lock(m_state);
+            token = m_grants.issue(uid, GrantStore::Clock::now());
+        }
+        if (token.empty()) {
+            return reply(client, Error);
+        }
+        sendLine(client, std::to_string(Recognized) + ' ' + token);
     }
 
     // Captures a face here, in the sandbox, so OpenCV never handles camera frames as root.
@@ -345,46 +466,111 @@ private:
     bool isLockedOut(uid_t uid, const FailureLimits &limits)
     {
         const std::lock_guard lock(m_state);
-        return m_failures.isLockedOut(uid, limits, FailureLimiter::Clock::now());
+        return m_failures.limiter.isLockedOut(uid, limits, FailureLimiter::Clock::now());
     }
 
-    void restoreFailures()
+    int hasFingerprint(const std::string &user, uid_t uid)
     {
-        std::ifstream file(failuresPath);
-        m_failures.restore(std::string(std::istreambuf_iterator<char>(file), {}));
+        std::string message;
+        const ExitCode code = enrolledFingerprints(user, message);
+        const std::lock_guard lock(m_state);
+        if (code == Recognized && m_fingerprintFailures.limiter.isLockedOut(uid, FailureLimits::fromConfig(Config()), FailureLimiter::Clock::now())) {
+            return LockedOut;
+        }
+        return code;
     }
 
-    void saveFailures()
+    // Asks fprintd for the user's finger, telling the client what to do as the reader asks.
+    int verifyFinger(int client, const std::string &user, uid_t uid)
     {
-        const std::string temporary = std::string(failuresPath) + ".new";
-        std::ofstream(temporary) << m_failures.save();
-        std::rename(temporary.c_str(), failuresPath);
+        const Config config;
+        const FailureLimits limits = FailureLimits::fromConfig(config);
+        const auto lockedOut = [&] {
+            const std::lock_guard lock(m_state);
+            return m_fingerprintFailures.limiter.isLockedOut(uid, limits, FailureLimiter::Clock::now());
+        };
+        if (lockedOut()) {
+            say(client, "Too many fingerprint attempts; use your password", MessageKind::Error);
+            return LockedOut;
+        }
+        const auto hungUp = [client] {
+            return clientHungUp(client);
+        };
+        constexpr auto patience = std::chrono::seconds(1);
+        const std::optional<TurnQueue::Turn> turn = m_reader.take(uid, hungUp, patience);
+        if (!turn) {
+            say(client, "The fingerprint reader is in use", MessageKind::Error);
+            return Aborted;
+        }
+        if (lockedOut()) {
+            say(client, "Too many fingerprint attempts; use your password", MessageKind::Error);
+            return LockedOut;
+        }
+        const FingerprintOptions options{
+            .timeout = std::chrono::seconds(std::max(1, int(config.number("fingerprint/timeout", 30)))),
+            .maxTries = std::max(1, int(config.number("fingerprint/max_tries", 3))),
+        };
+        std::string message;
+        const ExitCode code = verifyFingerprint(user,
+                                                options,
+                                                {
+                                                    .say =
+                                                        [client](const std::string &text) {
+                                                            say(client, text);
+                                                        },
+                                                    .cancelled = hungUp,
+                                                    .noMatch =
+                                                        [&] {
+                                                            return !recordFailure(m_fingerprintFailures, user, uid, limits, "fingers");
+                                                        },
+                                                },
+                                                message);
+        if (code == Recognized) {
+            recordSuccess(m_fingerprintFailures, uid);
+        } else if (!message.empty() && code != Aborted) {
+            say(client, message, MessageKind::Error);
+        }
+        return code;
+    }
+
+    void recordSuccess(KeptLimiter &failures, uid_t uid)
+    {
+        const std::lock_guard lock(m_state);
+        failures.limiter.recordSuccess(uid);
+        failures.save();
+    }
+
+    // Returns true when this failure locked the user out.
+    bool recordFailure(KeptLimiter &failures, const std::string &user, uid_t uid, const FailureLimits &limits, const char *what)
+    {
+        const std::lock_guard lock(m_state);
+        const bool lockedOut = failures.limiter.recordFailure(uid, limits, FailureLimiter::Clock::now());
+        if (lockedOut) {
+            std::cerr << "kenning daemon: unlocking with " << what << " locked for " << user << " for " << limits.lockout.count() << " minutes after "
+                      << limits.maxFailures << " unrecognized " << what << "\n";
+        }
+        failures.save();
+        return lockedOut;
     }
 
     void recordResult(const std::string &user, uid_t uid, const ScanResult &result, const FailureLimits &limits)
     {
-        const std::lock_guard lock(m_state);
         if (result.code == Recognized) {
-            m_failures.recordSuccess(uid);
-            saveFailures();
-            return;
+            recordSuccess(m_failures, uid);
+        } else if (result.code == Timeout && result.stats.faceFrames > 0) {
+            // Only a face that was seen and not recognized counts.
+            recordFailure(m_failures, user, uid, limits, "faces");
         }
-        // Only a face that was seen and not recognized counts.
-        if (result.code != Timeout || result.stats.faceFrames == 0) {
-            return;
-        }
-        if (m_failures.recordFailure(uid, limits, FailureLimiter::Clock::now())) {
-            std::cerr << "kenning daemon: face unlock locked for " << user << " for " << limits.lockout.count() << " minutes after " << limits.maxFailures
-                      << " unrecognized faces\n";
-        }
-        saveFailures();
     }
 
-    // Guards m_failures and m_signedIn: each connection is served in a thread of its own.
+    // Guards the limiters, m_signedIn and m_grants: each connection is served in a thread of its own.
     std::mutex m_state;
-    FailureLimiter m_failures;
+    KeptLimiter m_failures{failuresPath};
+    KeptLimiter m_fingerprintFailures{fingerprintFailuresPath};
     SignedInUsers m_signedIn;
+    GrantStore m_grants;
     TurnQueue m_camera;
+    TurnQueue m_reader;
 };
 }
 
