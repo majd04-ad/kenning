@@ -130,7 +130,7 @@ To have the steps read aloud, also install `speech-dispatcher` and `espeak-ng` f
 With a fingerprint reader and `fprintd` installed:
 
 1. Set up your fingerprints in **System Settings › Users**, or press **Set Up…** next to **Your fingerprint** in Face & Fingerprint settings.
-2. In **Face & Fingerprint**, under **Use your fingerprint for**, tick where to use them: **Lock screen, as its own choice** (Plasma 6.8 or newer), **Administrator prompts** and **sudo in the terminal**.
+2. In **Face & Fingerprint**, under **Use your fingerprint for**, tick where to use them: **Login screen**, **Lock screen** (Plasma 6.8 or newer), **Administrator prompts** and **sudo in the terminal**.
 3. Press **Apply**. The lock screen then shows a **Fingerprint** button next to **Password**, and reads your finger only once you press it. Typing switches back to the password.
 
 Administrator prompts use Kenning's version of Plasma's dialog, with **Password**, **Fingerprint** and **Face** as buttons. It starts with the method chosen in **Start with** (Face by default; Fingerprint, or whichever you used last time, are the other choices), which the lock screen uses too. It takes over at your next login; to switch back to Plasma's dialog, untick **Administrator prompts: Use Kenning's dialog**. `run0` and `pkexec` ask through this dialog too. A method that can't be used right now (the camera is switched off, or too many fingers or faces weren't yours) keeps its button, and says why when you choose it.
@@ -186,7 +186,7 @@ This also takes it off the lock screen and the sign-in prompts. To delete your s
 - **"Too dark or too bright".** Face the light instead of having it behind you, or turn on a lamp. Bright sunlight from behind or beside you can also cause this.
 - **Face & Fingerprint isn't in System Settings.** Close System Settings and open it again. If it still isn't there, restart the computer.
 - **"No camera was found", or "The camera is off or in use".** Many laptops have a switch or a key (often **F6** or a slider beside the lens) that disconnects the camera; turn it on. Check that the camera works in another app, such as Kamoso, and then close that app: only one program can use the camera at a time. Face unlock works again as soon as the camera is back; nothing has to be set up again.
-- **The lock screen has no Face (or Fingerprint) button.** Each user chooses the lock screen's buttons. Open Face & Fingerprint settings, tick **Lock screen** under **Use your face for** (or **Lock screen, as its own choice** under **Use your fingerprint for**) and press **Apply**.
+- **The lock screen has no Face (or Fingerprint) button.** Each user chooses the lock screen's buttons. Open Face & Fingerprint settings, tick **Lock screen** under **Use your face for** (or under **Use your fingerprint for**) and press **Apply**.
 - **It stopped working after reinstalling.** Open Face & Fingerprint settings and press **Test**. The message says what is missing; `journalctl -b -u kenning` shows why each scan failed.
 - **`systemctl enable kenning` says the unit has no installation config.** You don't need to enable anything. The package already sets the service to start with the computer, and it runs the first time it's needed. `systemctl status kenning.socket` shows it listening, even when it says "disabled".
 - **Anything else:** [open an issue](https://github.com/RishonDev/kenning/issues/new/choose). The form tells you what to include.
