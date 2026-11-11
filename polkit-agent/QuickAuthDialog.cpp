@@ -1,19 +1,23 @@
 /*  This file is part of the KDE project
     SPDX-FileCopyrightText: 2021 Aleix Pol Gonzalez <aleixpol@kde.org>
     SPDX-FileCopyrightText: 2023 Devin Lin <devin@kde.org>
+    SPDX-FileCopyrightText: 2026 Majd Abu Diab
 
     SPDX-License-Identifier: GPL-2.0-or-later
 */
 #include "QuickAuthDialog.h"
 #include "IdentitiesModel.h"
+#include "agentconfig.h"
 
 #include <PolkitQt1/Authority>
 
+#include <KConfig>
+#include <KConfigGroup>
 #include <KLocalizedQmlContext>
 #include <KLocalizedString>
-#include <KNotification>
-#include <KRuntimePlatform>
 #include <KUser>
+
+#include <PolkitQt1/ActionDescription>
 
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -27,9 +31,22 @@ QuickAuthDialog::QuickAuthDialog(const QString &actionId,
     : QObject(nullptr)
     , m_actionId(actionId)
 {
+    // Here rather than in the listener, so the smoke test, which has none, gets them too.
+    static const bool registered = [] {
+        qmlRegisterType<IdentitiesModel>("org.kde.polkitkde", 1, 0, "IdentitiesModel");
+        qmlRegisterUncreatableType<PolkitQt1::ActionDescription>("org.kde.polkitkde", 1, 0, "ActionDescription", "nope!");
+        return true;
+    }();
+    Q_UNUSED(registered);
+
     auto engine = new QQmlApplicationEngine(this);
     QVariantMap props = {
         {"mainText", message},
+        // The face scan animation chosen in System Settings > Face & Fingerprint
+        {"animationStyle",
+         KConfig(QStringLiteral(KENNING_SYSTEM_CONFIG), KConfig::SimpleConfig)
+             .group(QStringLiteral("Appearance"))
+             .readEntry("AnimationStyle", QStringLiteral("hello"))},
     };
 
     const auto actions = PolkitQt1::Authority::instance()->enumerateActionsSync();
@@ -47,17 +64,13 @@ QuickAuthDialog::QuickAuthDialog(const QString &actionId,
     engine->setInitialProperties(props);
     engine->rootContext()->setContextObject(new KLocalizedQmlContext(engine));
 
-    if (KRuntimePlatform::runtimePlatform().contains("phone")) {
-        // If this is Plasma Mobile
-        engine->load("qrc:/qml/MobileQuickAuthDialog.qml");
-    } else if (KRuntimePlatform::runtimePlatform().contains("mediacenter")) {
-        // If this is Plasma Bigscreen
-        engine->load("qrc:/qml/MediacenterQuickAuthDialog.qml");
-    } else {
-        // If this is Plasma Desktop, or other platforms
-        engine->load("qrc:/qml/QuickAuthDialog.qml");
-    }
+    // Kenning keeps the desktop dialog only.
+    engine->load(QStringLiteral("qrc:/qml/QuickAuthDialog.qml"));
 
+    if (engine->rootObjects().isEmpty()) {
+        qWarning() << "The dialog's QML failed to load";
+        return;
+    }
     m_theDialog = qobject_cast<QQuickWindow *>(engine->rootObjects().constFirst());
 
     auto idents = qobject_cast<IdentitiesModel *>(m_theDialog->property("identitiesModel").value<QObject *>());
@@ -71,6 +84,7 @@ QuickAuthDialog::QuickAuthDialog(const QString &actionId,
     connect(m_theDialog, SIGNAL(accept()), this, SIGNAL(okClicked()));
     connect(m_theDialog, SIGNAL(reject()), this, SIGNAL(rejected()));
     connect(m_theDialog, SIGNAL(userSelected()), this, SIGNAL(userSelected()));
+    connect(m_theDialog, SIGNAL(methodSelected(QString)), this, SIGNAL(methodSelected(QString)));
 }
 
 enum KirigamiInlineMessageTypes {
@@ -114,9 +128,6 @@ void QuickAuthDialog::authenticationFailure()
 
 void QuickAuthDialog::show()
 {
-    KNotification *notification = new KNotification("authenticate");
-    notification->setText(i18n("Authentication Required"));
-    notification->sendEvent();
     QTimer::singleShot(0, m_theDialog, SLOT(show()));
 }
 
@@ -128,6 +139,31 @@ void QuickAuthDialog::hide()
 void QuickAuthDialog::request([[maybe_unused]] const QString &request, [[maybe_unused]] bool echo)
 {
     QTimer::singleShot(0, m_theDialog, SLOT(request()));
+}
+
+void QuickAuthDialog::setMethods(const QStringList &methods)
+{
+    m_theDialog->setProperty("methods", methods);
+}
+
+void QuickAuthDialog::setMethod(const QString &method)
+{
+    m_theDialog->setProperty("method", method);
+}
+
+void QuickAuthDialog::setMethodStatus(const QString &status)
+{
+    m_theDialog->setProperty("methodStatus", status);
+}
+
+void QuickAuthDialog::setMethodState(int state)
+{
+    m_theDialog->setProperty("methodState", state);
+}
+
+int QuickAuthDialog::methodState() const
+{
+    return m_theDialog->property("methodState").toInt();
 }
 
 #include "moc_QuickAuthDialog.cpp"
