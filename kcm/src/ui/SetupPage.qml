@@ -127,6 +127,12 @@ KCM.SimpleKCM {
         if (line.includes("Multiple faces")) {
             return i18n("More than one face was found. Make sure only you are in view.");
         }
+        if (line.includes("open camera") || line.includes("no frames")) {
+            return i18n("The camera couldn't be used. Is it switched off, unplugged or in use by another app?");
+        }
+        if (line.includes("isn't reachable")) {
+            return i18n("Kenning's service isn't running. Try again; if it keeps happening, restart the computer.");
+        }
         return "";
     }
 

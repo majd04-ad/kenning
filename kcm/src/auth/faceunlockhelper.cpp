@@ -21,7 +21,6 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
-#include <QRegularExpression>
 #include <QSaveFile>
 #include <QTemporaryDir>
 
@@ -274,21 +273,30 @@ bool secureModels()
     return secured;
 }
 
+// Writes down the camera when none is: first setup, or a config.ini that lost its settings.
+// A configured camera that is away (switched off, unplugged) is kept: it comes back.
+void rememberCamera()
+{
+    if (FaceUnlock::cameraConfigured(FaceUnlock::Config(FaceUnlock::configPath))) {
+        return;
+    }
+    if (const FaceUnlock::Camera camera = FaceUnlock::findCamera(); !camera.path.empty()) {
+        updateEngineConfig({{QStringLiteral("video/device_path"), QString::fromStdString(camera.path)},
+                            {QStringLiteral("video/colour"), camera.colour ? QStringLiteral("true") : QStringLiteral("false")}});
+    }
+}
+
+// Set Up may also move to the camera that is there now, when the configured one is gone for good.
 void prepareEngine()
 {
-    QFile file(FaceUnlock::engineConfigPath);
-    if (file.open(QIODevice::ReadOnly)) {
-        static const QRegularExpression devicePath(QStringLiteral("^device_path\\s*=\\s*(.*)$"), QRegularExpression::MultilineOption);
-        const QString configured = devicePath.match(QString::fromUtf8(file.readAll())).captured(1).trimmed();
-        file.close();
-        if (configured.isEmpty() || configured == QLatin1String("none") || !QFile::exists(configured)) {
-            if (const FaceUnlock::Camera camera = FaceUnlock::findCamera(); !camera.path.isEmpty()) {
-                updateEngineConfig({{QStringLiteral("video/device_path"), camera.path},
-                                    {QStringLiteral("video/colour"), camera.colour ? QStringLiteral("true") : QStringLiteral("false")}});
-            }
+    const FaceUnlock::Config config(FaceUnlock::configPath);
+    if (FaceUnlock::cameraConfigured(config) && !FaceUnlock::isCharacterDevice(config.string("video/device_path"))) {
+        if (const FaceUnlock::Camera camera = FaceUnlock::findCamera(); !camera.path.empty()) {
+            updateEngineConfig({{QStringLiteral("video/device_path"), QString::fromStdString(camera.path)},
+                                {QStringLiteral("video/colour"), camera.colour ? QStringLiteral("true") : QStringLiteral("false")}});
         }
     }
-
+    rememberCamera();
     secureModels();
 }
 }
@@ -375,6 +383,7 @@ ActionReply FaceUnlockHelper::save(const QVariantMap &args)
     if (!accepted.isEmpty() && !updateEngineConfig(accepted)) {
         return failure(QStringLiteral("Could not write %1").arg(FaceUnlock::engineConfigPath));
     }
+    rememberCamera();
 
     const QVariantMap pam = args.value(QStringLiteral("pam")).toMap();
     for (const auto &service : FaceUnlock::pamServices()) {

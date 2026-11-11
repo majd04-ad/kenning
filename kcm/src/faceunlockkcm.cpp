@@ -137,6 +137,9 @@ FaceUnlockKcm::FaceUnlockKcm(QObject *parent, const KPluginMetaData &data)
 {
     qmlRegisterType<CameraPreview>("org.kde.kenning", 1, 0, "CameraPreview");
     setButtons(Apply | Default);
+    // The page binds to every setting as it is created, before load() has read them.
+    m_settings = defaultSettings();
+    m_loaded = m_settings;
 }
 
 QVariantMap FaceUnlockKcm::defaultSettings()
@@ -176,15 +179,15 @@ void FaceUnlockKcm::load()
             settings.insert(it.key(), fromConfigText(defaults.value(it.key()), it.value().toString()));
         }
     }
-    const QString configured = engine.value(QStringLiteral("video/device_path")).toString();
-    if (configured.isEmpty() || configured == QLatin1String("none") || !QFile::exists(configured)) {
-        const FaceUnlock::Camera camera = FaceUnlock::findCamera();
-        m_devicePath = camera.path;
-        m_colourCamera = camera.colour;
-    } else {
-        m_devicePath = configured;
-        m_colourCamera = engine.value(QStringLiteral("video/colour")).toString() == QLatin1String("true");
-    }
+    // The camera scans use. With one configured that is away (switched off, unplugged), Set Up
+    // could still move to another that is there now.
+    const FaceUnlock::Config engineConfig(FaceUnlock::configPath);
+    const bool configured = FaceUnlock::cameraConfigured(engineConfig);
+    const std::optional<FaceUnlock::Camera> inUse = FaceUnlock::cameraFor(engineConfig);
+    const FaceUnlock::Camera camera = inUse ? *inUse : FaceUnlock::findCamera();
+    m_devicePath = QString::fromStdString(camera.path);
+    m_colourCamera = camera.colour;
+    m_cameraAway = configured && !inUse;
     // The IR picture looks unsettling; preview the webcam when there is one.
     const QString colourPath = m_colourCamera ? QString() : FaceUnlock::findPreviewCamera();
     m_previewPath = colourPath.isEmpty() ? m_devicePath : colourPath;
@@ -363,6 +366,11 @@ QString FaceUnlockKcm::previewPath() const
 bool FaceUnlockKcm::colourCamera() const
 {
     return m_colourCamera;
+}
+
+bool FaceUnlockKcm::cameraAway() const
+{
+    return m_cameraAway;
 }
 
 bool FaceUnlockKcm::engineInstalled() const

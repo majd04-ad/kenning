@@ -40,6 +40,8 @@ KCM.SimpleKCM {
         case 15: return kcm.colourCamera ? i18n("The camera picture was too bright. Light your face from the front, with no bright window behind you.")
                                          : i18n("The camera picture was too bright. Move out of direct sunlight or away from a bright lamp.");
         case 14: return i18n("Face unlock is paused for a few minutes after too many faces that weren't yours.");
+        case 16: return i18n("Face unlock waits until you have signed in with your password once after a restart.");
+        case 17: return i18n("The camera couldn't be used. Is it switched off, unplugged or in use by another app?");
         case -1: return message;
         default: return i18n("Face recognition stopped (%1).", message);
         }
@@ -112,8 +114,15 @@ KCM.SimpleKCM {
         }
         HeaderMessage {
             type: Kirigami.MessageType.Warning
-            visible: kcm.engineInstalled && kcm.devicePath === ""
-            text: i18n("No camera was found. Connect one and open this page again; an infrared camera, as on laptops that support face sign-in, works best and is the safest.")
+            visible: kcm.engineInstalled && kcm.devicePath === "" && !kcm.cameraAway
+            text: i18n("No camera was found. If yours has a switch or a key that turns it off, turn it on and open this page again. An infrared camera, as on laptops that support face sign-in, works best and is the safest.")
+        }
+        HeaderMessage {
+            type: Kirigami.MessageType.Warning
+            visible: kcm.engineInstalled && kcm.cameraAway
+            text: kcm.devicePath === ""
+                ? i18n("The camera is switched off or unplugged, so face unlock can't see you. It works again once the camera is back; your password and fingerprint work meanwhile.")
+                : i18n("The camera face unlock was set up with is switched off or unplugged. It works again once that camera is back. To use the camera that is connected now instead, add a look with it.")
         }
         HeaderMessage {
             type: Kirigami.MessageType.Error
