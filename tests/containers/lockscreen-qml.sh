@@ -55,13 +55,20 @@ fi
 mkdir -p /usr/share/kenning
 cp -r /src/kcm/themes /usr/share/kenning/
 qml_problems /tmp/patched.log > /tmp/patched.txt
-# The scan animation looks for user-installed themes first: proof the patched lock
-# screen actually loaded, rather than the greeter failing before it got that far.
-if grep -q "kenning/themes" /tmp/patched.log; then
+# Proof the patched lock screen actually loaded, rather than the greeter failing before
+# it got that far: a user-installed theme (looked for first) that says when it's created.
+# A separate run, so the comparison below sees the real built-in themes.
+marker=/usr/local/share/kenning/themes/hello/contents/ui
+mkdir -p "$marker"
+# console.warn, not console.log: Fedora's Qt switches debug messages off (*.debug=false).
+printf 'import QtQuick\nItem { property int faceState; property string message; property color highlightColor; property color successColor; property color failureColor; property color textColor; Component.onCompleted: console.warn("kenning-theme-loaded") }\n' > "$marker/main.qml"
+qml_problems /tmp/marker.log > /dev/null
+rm -rf /usr/local/share/kenning
+if grep -q "kenning-theme-loaded" /tmp/marker.log; then
     result "patched lock screen ran" PASS
 else
     result "patched lock screen ran" FAIL "no sign of the scan animation loading"
-    tail -15 /tmp/patched.log | sed 's/^/   /'
+    tail -15 /tmp/marker.log | sed 's/^/   /'
 fi
 
 new=$(comm -13 /tmp/stock.txt /tmp/patched.txt)
