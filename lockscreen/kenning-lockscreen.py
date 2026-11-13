@@ -16,7 +16,7 @@ from pathlib import Path
 # VERSION changes whenever the edits do, so an older patch is redone from the saved original.
 MARKER = "kenning lock screen patch"
 LEGACY_MARKERS = ("lazysetup face unlock", "plasma-faceunlock lock screen patch")
-VERSION = "face unlock patch 17"
+VERSION = "face unlock patch 18"
 
 RESTORE = len(sys.argv) > 1 and sys.argv[1] == "--restore"
 if RESTORE:
@@ -132,7 +132,7 @@ UI_FUNCTION = ("""    property string pendingPassword
         repeat: true
         running: lockScreenUi.preferredMethod === 1
         onTriggered: {{
-            if (++tries > 6 || authenticator.authenticator !== 1) {{
+            if (++tries > 6 || authenticator.authenticator !== 1 || authenticator.unlocked) {{
                 stop();
             }} else if (!authenticator.busy) {{
                 authenticator.startAuthenticating();
@@ -309,6 +309,10 @@ UI_FALLBACK = ("""        function onFailed(kind) {
             }
 """, """        function onFailed(kind) {
             if (kind != 0) { // if this is coming from the noninteractive authenticators
+                return;
+            }
+            // Unlocked already: a worker ended with the lock screen, not a method that failed.
+            if (authenticator.unlocked) {
                 return;
             }
             if (authenticator.authenticator === 3) {
