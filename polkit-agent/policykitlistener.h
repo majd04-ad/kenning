@@ -70,6 +70,11 @@ private:
     KenningService *m_kenning;
     QString m_method;
     QString m_token;
+    // Asking the service which methods there are: no PAM conversation starts until it answers, as
+    // one cancelled while it asks for the password counts as a failed attempt (pam_faillock).
+    bool m_findingMethods = false;
+    // Typed and sent before a conversation asked for it; answers the first prompt.
+    QString m_pendingPassword;
     // Let the scan animation finish: back to waiting after a touch to repeat, through PAM after a
     // match, to the password (saying m_failure) after giving up.
     QTimer *m_retryTimer;
@@ -91,7 +96,8 @@ private:
     void handleWaylandActivation(const QString &action, const QString &token);
     // The selected identity's login name when it is the user at this computer, else empty.
     QString kenningUser() const;
-    void findMethods();
+    // Returns whether the service is being asked; methodsFound() then starts the conversation.
+    bool findMethods();
     void selectMethod(const QString &method);
     // Ends the current PAM conversation without ending the request.
     void dropSession();

@@ -232,12 +232,14 @@ void PolicyKitListener::initiateAuthentication(const QString &actionId,
 
     m_method = password;
     m_token.clear();
+    m_pendingPassword.clear();
     m_dialog->setMethods({password});
     m_dialog->setMethod(password);
-    findMethods();
 
     m_numTries = 0;
-    tryAgain();
+    if (!findMethods()) {
+        tryAgain();
+    }
 }
 
 void PolicyKitListener::handleParentWindow(const QString &action, const QString &handle)
@@ -322,6 +324,8 @@ void PolicyKitListener::finishObtainPrivilege()
     m_kenning->cancel();
     stopAnimationTimers();
     m_token.clear();
+    m_pendingPassword.clear();
+    m_findingMethods = false;
     m_inProgress = false;
 
     qDebug() << "Finish obtain authorization:" << m_gainedAuthorization;
@@ -358,6 +362,12 @@ void PolicyKitListener::request(const QString &request, bool echo)
         m_method = password;
         m_dialog->setMethod(password);
     }
+    // Sent before this conversation began: its answer, rather than asking again.
+    if (!m_pendingPassword.isEmpty() && !m_session.isNull() && m_method == password) {
+        m_session->setResponse(m_pendingPassword);
+        m_pendingPassword.clear();
+        return;
+    }
     if (!m_dialog.isNull()) {
         m_dialog.data()->request(request, echo);
     }
@@ -392,8 +402,17 @@ void PolicyKitListener::dialogAccepted()
 {
     qDebug() << "Dialog accepted";
 
-    if (!m_session.isNull() && !m_dialog.isNull()) {
+    if (m_dialog.isNull()) {
+        return;
+    }
+    if (!m_session.isNull()) {
         m_session.data()->setResponse(m_dialog.data()->password());
+        return;
+    }
+    // Sent before a conversation asked for it: kept for the first prompt, once there is one.
+    m_pendingPassword = m_dialog.data()->password();
+    if (m_method == password && !m_findingMethods) {
+        tryAgain();
     }
 }
 
@@ -419,10 +438,12 @@ void PolicyKitListener::userSelected()
     stopAnimationTimers();
     m_method = password;
     m_token.clear();
+    m_pendingPassword.clear();
     m_dialog->setMethods({password});
     m_dialog->setMethod(password);
-    findMethods();
-    tryAgain();
+    if (!findMethods()) {
+        tryAgain();
+    }
 }
 
 QString PolicyKitListener::kenningUser() const
@@ -432,16 +453,32 @@ QString PolicyKitListener::kenningUser() const
     return m_selectedUser.isValid() && m_selectedUser.toString() == QLatin1String("unix-user:") + login ? login : QString();
 }
 
-void PolicyKitListener::findMethods()
+bool PolicyKitListener::findMethods()
 {
+    m_findingMethods = false;
     if (const QString user = kenningUser(); !user.isEmpty()) {
+        m_findingMethods = true;
         m_kenning->findMethods(user);
     }
+    return m_findingMethods;
 }
 
 void PolicyKitListener::methodsFound(const QString &user, const QStringList &methods, const QStringList &ready)
 {
-    if (m_dialog.isNull() || user != kenningUser() || methods.isEmpty()) {
+    // An answer about a user no longer selected; that selection asked again.
+    if (m_dialog.isNull() || user != kenningUser() || !m_findingMethods) {
+        return;
+    }
+    m_findingMethods = false;
+    // The password, unless a finger or face takes over below. Chosen meanwhile, the method started
+    // its own way (selectMethod), so then there is nothing to start.
+    const auto startPassword = [this] {
+        if (m_method == password && m_session.isNull()) {
+            tryAgain();
+        }
+    };
+    if (methods.isEmpty()) {
+        startPassword();
         return;
     }
     m_dialog->setMethods(QStringList{password} + methods);
@@ -455,9 +492,11 @@ void PolicyKitListener::methodsFound(const QString &user, const QStringList &met
     if (methods.contains(first) && !ready.contains(first)) {
         first = ready.value(0);
     }
-    if (ready.contains(first) && m_method == password && m_dialog->password().isEmpty()) {
+    if (ready.contains(first) && m_method == password && m_dialog->password().isEmpty() && m_pendingPassword.isEmpty()) {
         selectMethod(first);
+        return;
     }
+    startPassword();
 }
 
 void PolicyKitListener::methodSelected(const QString &method)
