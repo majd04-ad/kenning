@@ -9,11 +9,14 @@ Build-Depends: debhelper-compat (= 13),
                libkf6auth-dev,
                libkf6config-dev,
                libkf6coreaddons-dev,
+               libkf6dbusaddons-dev,
                libkf6i18n-dev,
                libkf6kcmutils-dev,
+               libkf6windowsystem-dev,
                libkirigami-dev,
                libopencv-dev,
                libpam0g-dev,
+               libpolkit-qt6-1-dev,
                libarchive-dev,
                libsystemd-dev,
                pkgconf,
@@ -38,7 +41,7 @@ Depends: ${misc:Depends},
          qml6-module-qtquick-layouts,
          qml6-module-qtquick-shapes,
          systemd
-Recommends: plasma-desktop, qml6-module-qttexttospeech, speech-dispatcher
+Recommends: fprintd, plasma-desktop, qml6-module-qttexttospeech, speech-dispatcher
 Description: face unlock for KDE Plasma
  Kenning signs you in with your face: on the lock screen, for sudo and, with
  its version of Plasma Login Manager, on the login screen. It works best with
@@ -47,3 +50,6 @@ Description: face unlock for KDE Plasma
  It includes a System Settings page to set it up, an animated face scan on
  the lock screen (Plasma 6.8 or newer) and installable animation themes.
  Recognition runs in a small service that owns the camera and the face models.
+ .
+ Fingerprints read by fprintd become a choice of their own on the lock screen
+ and in administrator prompts, instead of a wait before the password.

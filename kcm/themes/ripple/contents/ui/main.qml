@@ -20,7 +20,10 @@ Item {
     property color successColor
     property color failureColor
     property color textColor
+    // Optional: "face" or "fingerprint", what is being read; hosts before 0.9 don't set it.
+    property string method: "face"
 
+    readonly property bool fingerprint: method === "fingerprint"
     readonly property bool scanning: faceState === 1
     readonly property bool recognized: faceState === 2
     readonly property bool failed: faceState === 3
@@ -105,7 +108,7 @@ Item {
                     anchors.centerIn: parent
                     width: parent.width * 0.55
                     height: width
-                    source: root.recognized ? "checkmark" : (root.failed ? "dialog-close" : "user-identity")
+                    source: root.recognized ? "checkmark" : (root.failed ? "dialog-close" : (root.fingerprint ? "fingerprint-symbolic" : "user-identity"))
                     color: root.recognized ? "white" : root.accent
                     isMask: true
                 }

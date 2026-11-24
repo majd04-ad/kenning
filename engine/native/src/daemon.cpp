@@ -5,23 +5,31 @@
 // kenning daemon: face checks for pam_kenning, so the face models stay root-only.
 
 #include "daemon.h"
+#include "camera.h"
 #include "engine.h"
 #include "failurelimiter.h"
+#include "fingerprint.h"
+#include "grants.h"
 #include "service.h"
 #include "signedin.h"
+#include "turnqueue.h"
 
-#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <fcntl.h>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
+#include <mutex>
+#include <optional>
 #include <poll.h>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <systemd/sd-login.h>
+#include <thread>
 #include <vector>
 
 namespace FaceUnlock
@@ -30,22 +38,76 @@ namespace
 {
 // Socket activated: exits after this long without a request.
 constexpr int idleExitMs = 5 * 60 * 1000;
-// A request must arrive whole within this time, however slowly it trickles in. Requests
-// are read side by side, so a slow client only holds up itself.
+// A request must arrive whole within this time, however slowly it trickles in. Each
+// connection has a thread, so a slow client only holds up itself.
 constexpr auto requestDeadline = std::chrono::seconds(2);
 constexpr int replyTimeoutSeconds = 2;
 constexpr std::size_t maxRequestLength = 255;
-// Connections still sending their request: per user, and in all.
-constexpr std::size_t maxPendingPerUser = 4;
-constexpr std::size_t maxPending = 64;
+// Each connection has a thread; more than this at once are turned away.
+constexpr int maxConnections = 32;
+// Connections of one user still sending their request, so a slow sender can't take them all.
+constexpr std::size_t maxArrivingPerUser = 4;
 // In /run like pam_faillock's records: kept across service restarts, cleared at reboot.
 constexpr const char *failuresPath = "/run/kenning/failures";
+constexpr const char *fingerprintFailuresPath = "/run/kenning/fingerprint-failures";
 constexpr const char *signedInPath = "/run/kenning/signed-in";
+
+void sendLine(int client, const std::string &line)
+{
+    const std::string text = line + '\n';
+    send(client, text.data(), text.size(), MSG_NOSIGNAL);
+}
 
 void reply(int client, int code)
 {
-    const std::string text = std::to_string(code) + '\n';
-    send(client, text.data(), text.size(), MSG_NOSIGNAL);
+    sendLine(client, std::to_string(code));
+}
+
+// A progress line for the client to show (or to pass on as a PAM message).
+void say(int client, const std::string &text, MessageKind kind = MessageKind::Info)
+{
+    std::string line = text;
+    std::erase(line, '\n');
+    sendLine(client, (kind == MessageKind::Info ? "# " : "! ") + line);
+}
+
+// A failure limiter whose records survive a restart of the service, until the next reboot.
+class KeptLimiter
+{
+public:
+    explicit KeptLimiter(const char *path)
+        : m_path(path)
+    {
+        std::ifstream file(m_path);
+        limiter.restore(std::string(std::istreambuf_iterator<char>(file), {}));
+    }
+
+    void save()
+    {
+        const std::string temporary = std::string(m_path) + ".new";
+        std::ofstream(temporary) << limiter.save();
+        std::rename(temporary.c_str(), m_path);
+    }
+
+    FailureLimiter limiter;
+
+private:
+    const char *m_path;
+};
+
+// The user's uid. getpwnam_r: each connection has a thread, and getpwnam's answer is shared by all.
+std::optional<uid_t> userId(const std::string &user)
+{
+    if (user.find('/') != std::string::npos) {
+        return std::nullopt;
+    }
+    passwd entry{};
+    passwd *found = nullptr;
+    std::vector<char> buffer(16 * 1024);
+    while (getpwnam_r(user.c_str(), &entry, buffer.data(), buffer.size(), &found) == ERANGE && buffer.size() < 1024 * 1024) {
+        buffer.resize(buffer.size() * 2);
+    }
+    return found ? std::optional(found->pw_uid) : std::nullopt;
 }
 
 // A local login of this user: the login screen refuses face unlock until there is one,
@@ -65,6 +127,31 @@ bool hasLocalLogin(uid_t uid)
     }
     std::free(sessions);
     return found;
+}
+
+// A local, active session of this user, such as the desktop they are sitting at.
+bool hasLocalSession(uid_t uid)
+{
+    char *session = nullptr;
+    if (sd_uid_get_display(uid, &session) < 0 || !session) {
+        return false;
+    }
+    const bool local = sd_session_is_remote(session) == 0 && sd_session_is_active(session) > 0;
+    std::free(session);
+    return local;
+}
+
+// The asking program runs at this computer: in a local session, or, outside any session (the
+// polkit dialog runs under the user's service manager), for a user signed in here.
+bool peerAtComputer(pid_t pid, uid_t uid)
+{
+    char *session = nullptr;
+    if (sd_pid_get_session(pid, &session) >= 0 && session) {
+        const bool local = sd_session_is_remote(session) == 0;
+        std::free(session);
+        return local;
+    }
+    return hasLocalSession(uid);
 }
 
 bool clientHungUp(int client)
@@ -101,107 +188,62 @@ int ownSocket()
 
 using Clock = std::chrono::steady_clock;
 
-struct PendingClient {
-    int fd = -1;
-    ucred peer{};
-    Clock::time_point deadline;
-    std::string buffer;
-    bool complete = false; // a newline arrived
-    bool done = false; // complete, hung up, or out of room
-};
+// The request line, which must arrive whole before the deadline however slowly it trickles in.
+std::optional<Request> receiveRequest(int client, Clock::time_point deadline)
+{
+    char buffer[maxRequestLength] = {};
+    std::size_t received = 0;
+    while (received < maxRequestLength && !std::memchr(buffer, '\n', received)) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+        if (left <= 0) {
+            return std::nullopt;
+        }
+        pollfd state{client, POLLIN, 0};
+        const int ready = poll(&state, 1, int(left));
+        if (ready < 0 && errno == EINTR) {
+            continue;
+        }
+        if (ready <= 0) {
+            return std::nullopt;
+        }
+        const ssize_t count = recv(client, buffer + received, maxRequestLength - received, MSG_DONTWAIT);
+        if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+            continue;
+        }
+        if (count <= 0) {
+            return std::nullopt;
+        }
+        received += std::size_t(count);
+    }
+    return parseRequest(std::string_view(buffer, received));
+}
 
-// Connections whose request hasn't fully arrived, read without blocking.
-class PendingClients
+// Connections still sending their request, per user.
+class Arrivals
 {
 public:
-    const std::vector<PendingClient> &clients() const
+    bool enter(uid_t uid)
     {
-        return m_clients;
+        const std::lock_guard lock(m_mutex);
+        std::size_t &count = m_counts[uid];
+        if (count >= maxArrivingPerUser) {
+            return false;
+        }
+        ++count;
+        return true;
     }
 
-    void accept(int listener, Clock::time_point now)
+    void leave(uid_t uid)
     {
-        const int fd = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK);
-        if (fd < 0) {
-            return;
+        const std::lock_guard lock(m_mutex);
+        if (--m_counts[uid] == 0) {
+            m_counts.erase(uid);
         }
-        PendingClient client{.fd = fd, .peer = {}, .deadline = now + requestDeadline, .buffer = {}};
-        socklen_t peerSize = sizeof(client.peer);
-        if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &client.peer, &peerSize) != 0 || m_clients.size() >= maxPending
-            || pendingFrom(client.peer.uid) >= maxPendingPerUser) {
-            close(fd);
-            return;
-        }
-        m_clients.push_back(std::move(client));
-    }
-
-    void read(int fd)
-    {
-        const auto found = std::find_if(m_clients.begin(), m_clients.end(), [fd](const PendingClient &client) {
-            return client.fd == fd;
-        });
-        if (found == m_clients.end() || found->done) {
-            return;
-        }
-        char chunk[maxRequestLength];
-        for (;;) {
-            const std::size_t room = maxRequestLength - found->buffer.size();
-            const ssize_t count = recv(fd, chunk, room, 0);
-            if (count < 0 && errno == EINTR) {
-                continue;
-            }
-            if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                return;
-            }
-            if (count <= 0) {
-                found->done = true;
-                return;
-            }
-            found->buffer.append(chunk, std::size_t(count));
-            if (found->buffer.find('\n') != std::string::npos) {
-                found->complete = found->done = true;
-                return;
-            }
-            if (found->buffer.size() >= maxRequestLength) {
-                found->done = true;
-                return;
-            }
-        }
-    }
-
-    // Removes and returns the clients to answer now, made blocking again.
-    std::vector<PendingClient> takeFinished(Clock::time_point now)
-    {
-        std::vector<PendingClient> finished;
-        std::erase_if(m_clients, [&](PendingClient &client) {
-            if (!client.done && now < client.deadline) {
-                return false;
-            }
-            fcntl(client.fd, F_SETFL, fcntl(client.fd, F_GETFL) & ~O_NONBLOCK);
-            finished.push_back(std::move(client));
-            return true;
-        });
-        return finished;
-    }
-
-    int millisecondsUntilNextDeadline(Clock::time_point now) const
-    {
-        auto next = m_clients.front().deadline;
-        for (const PendingClient &client : m_clients) {
-            next = std::min(next, client.deadline);
-        }
-        return int(std::max<long long>(0, std::chrono::duration_cast<std::chrono::milliseconds>(next - now).count() + 1));
     }
 
 private:
-    std::size_t pendingFrom(uid_t uid) const
-    {
-        return std::size_t(std::count_if(m_clients.cbegin(), m_clients.cend(), [uid](const PendingClient &client) {
-            return client.peer.uid == uid;
-        }));
-    }
-
-    std::vector<PendingClient> m_clients;
+    std::mutex m_mutex;
+    std::map<uid_t, std::size_t> m_counts;
 };
 
 class Service
@@ -209,12 +251,11 @@ class Service
 public:
     Service()
     {
-        restoreFailures();
         std::ifstream file(signedInPath);
         m_signedIn.restore(std::string(std::istreambuf_iterator<char>(file), {}));
     }
 
-    // client is blocking again, with the request read in full.
+    // The request has been read, or ran out of time.
     void serve(int client, const ucred &peer, const std::optional<Request> &request)
     {
         const timeval timeout{replyTimeoutSeconds, 0};
@@ -222,35 +263,70 @@ public:
         if (!request) {
             return reply(client, Aborted);
         }
-        const passwd *account = request->user.find('/') == std::string::npos ? getpwnam(request->user.c_str()) : nullptr;
+        const std::optional<uid_t> account = userId(request->user);
         if (!account) {
             return reply(client, Aborted);
         }
-        const bool needsPassword = Config().boolean("core/password_after_boot", true) && !signedInSinceBoot(account->pw_uid);
+        const uid_t uid = *account;
+        // Set Up, through the settings helper or sudo kenning add: an administrator already agreed.
+        if (request->command == "enroll") {
+            return reply(client, peer.uid == 0 ? enrollFace(client, request->user, request->argument) : Aborted);
+        }
+        const bool needsPassword = Config().boolean("core/password_after_boot", true) && !signedInSinceBoot(uid);
         // Asked by the login screen so it can skip the face scan after a restart. Open to anyone:
         // who has signed in since boot is public already (last, loginctl).
         if (request->command == "password-first") {
             return reply(client, needsPassword ? NeedsPassword : Recognized);
         }
+        // polkit's helper, through pam_kenning.so grant.
+        if (request->command == "has-grant" || request->command == "use-grant") {
+            if (peer.uid != 0) {
+                return reply(client, Aborted);
+            }
+            const std::lock_guard lock(m_state);
+            const auto now = GrantStore::Clock::now();
+            if (request->command == "has-grant") {
+                return reply(client, m_grants.pending(uid, now) ? Recognized : NoModel);
+            }
+            return reply(client, m_grants.use(uid, request->argument, now) ? Recognized : Aborted);
+        }
+        // Kenning's polkit dialog, for the user's own account only.
+        if (request->command == "grant") {
+            if (peer.uid != uid) {
+                return reply(client, Aborted);
+            }
+            return grant(client, request->user, uid, peer.pid, request->argument, needsPassword);
+        }
+
         // Only root, or the user asking about their own face.
-        if (peer.uid != 0 && peer.uid != account->pw_uid) {
+        if (peer.uid != 0 && peer.uid != uid) {
             return reply(client, Aborted);
         }
         // From pam_kenning when PAM ends: a typed password was wrong. Counted even before the
         // first sign-in after a restart, as pam_faillock would.
         if (request->command == "password-failed") {
-            recordFailure(request->user, account->pw_uid, FailureLimiter::Kind::Password, FailureLimits::fromConfig(Config()));
+            recordFailure(m_failures, request->user, uid, FailureLimiter::Kind::Password, FailureLimits::fromConfig(Config()), "faces");
             return reply(client, Recognized);
         }
 
+        // Fingerprints don't wait for a password after a restart: the first sign-in may use one.
+        if (request->command == "has-fingerprint") {
+            return reply(client, hasFingerprint(request->user, uid));
+        }
+        if (request->command == "fingerprint") {
+            return reply(client, verifyFinger(client, request->user, uid));
+        }
+
+        if (request->command == "has-model") {
+            // Without a face model there is nothing a password would bring back.
+            const int model = hasModel(request->user, uid);
+            return reply(client, needsPassword && model != NoModel ? NeedsPassword : model);
+        }
         if (needsPassword) {
             return reply(client, NeedsPassword);
         }
-        if (request->command == "has-model") {
-            return reply(client, hasModel(request->user, account->pw_uid));
-        }
         if (request->command == "compare") {
-            return reply(client, compareFace(client, request->user, account->pw_uid));
+            return reply(client, compareFace(client, request->user, uid));
         }
         reply(client, Aborted);
     }
@@ -258,12 +334,15 @@ public:
     bool canExit()
     {
         // Exiting would forget failed attempts and lockouts.
-        return m_failures.isEmpty(FailureLimiter::Clock::now());
+        const std::lock_guard lock(m_state);
+        const auto now = FailureLimiter::Clock::now();
+        return m_failures.limiter.isEmpty(now) && m_fingerprintFailures.limiter.isEmpty(now) && m_grants.isEmpty(GrantStore::Clock::now());
     }
 
 private:
     bool signedInSinceBoot(uid_t uid)
     {
+        const std::lock_guard lock(m_state);
         if (m_signedIn.contains(uid)) {
             return true;
         }
@@ -280,10 +359,20 @@ private:
 
     int hasModel(const std::string &user, uid_t uid)
     {
-        if (!std::filesystem::exists(modelPath(user))) {
+        // Without the error code, a models directory the service can't read throws and ends the service.
+        std::error_code error;
+        if (!std::filesystem::exists(modelPath(user), error)) {
             return NoModel;
         }
-        return m_failures.isLockedOut(uid, FailureLimits::fromConfig(Config()), FailureLimiter::Clock::now()) ? LockedOut : Recognized;
+        const Config config;
+        {
+            const std::lock_guard lock(m_state);
+            if (m_failures.limiter.isLockedOut(uid, FailureLimits::fromConfig(config), FailureLimiter::Clock::now())) {
+                return LockedOut;
+            }
+        }
+        // Switched off or unplugged: said before a scan starts, so nothing looks for a face in vain.
+        return cameraFor(config) ? Recognized : NoCamera;
     }
 
     int compareFace(int client, const std::string &user, uid_t uid)
@@ -291,60 +380,253 @@ private:
         // Read per request so settings changes apply without a restart.
         const Config config;
         const FailureLimits limits = FailureLimits::fromConfig(config);
-        if (m_failures.isLockedOut(uid, limits, FailureLimiter::Clock::now())) {
+        if (isLockedOut(uid, limits)) {
+            return LockedOut;
+        }
+        const auto hungUp = [client] {
+            return clientHungUp(client);
+        };
+        // One scan at a time; a user whose request is already waiting can't add another. The
+        // patience covers a scan that was just cancelled, e.g. switching methods in the polkit dialog.
+        constexpr auto patience = std::chrono::seconds(1);
+        const std::optional<TurnQueue::Turn> turn = m_camera.take(uid, hungUp, patience);
+        if (!turn) {
+            return Aborted;
+        }
+        // Another request may have locked the user out while this one waited.
+        if (isLockedOut(uid, limits)) {
             return LockedOut;
         }
         // A broken install must answer "failed", so PAM falls back to the password.
         try {
-            const ScanResult result = compare(config, user, [client] {
-                return clientHungUp(client);
-            });
+            const ScanResult result = compare(config, user, hungUp);
             recordResult(user, uid, result, limits);
+            logScan(user, result);
             return result.code;
         } catch (const std::exception &error) {
-            std::cerr << "kenning daemon: scan failed: " << error.what() << '\n';
+            std::cerr << "kenning daemon: scan failed: " << error.what() << std::endl;
             return Error;
         }
     }
 
-    void restoreFailures()
+    // One line per scan that didn't recognize anyone, for the journal: why face unlock didn't work.
+    static void logScan(const std::string &user, const ScanResult &result)
     {
-        std::ifstream file(failuresPath);
-        m_failures.restore(std::string(std::istreambuf_iterator<char>(file), {}));
+        if (result.code == Recognized || result.code == Aborted) {
+            return;
+        }
+        const ScanStats &stats = result.stats;
+        std::cerr << "kenning daemon: scan for " << user << ": " << result.message << " (code " << result.code << "; " << stats.frames << " frames, "
+                  << stats.darkFrames << " too dark, " << stats.brightFrames << " too bright, " << stats.faceFrames << " with a face";
+        if (result.bestScore < noMatchScore) {
+            std::cerr << ", best score " << result.bestScore;
+        }
+        if (result.code == NoCamera) {
+            const Config config;
+            std::cerr << "; camera " << (cameraConfigured(config) ? config.string("video/device_path") : std::string("not set up, and no IR camera found"));
+        }
+        std::cerr << ")" << std::endl;
     }
 
-    void saveFailures()
+    // A finger or face for an administrator prompt, answered "0 <token>" on a match.
+    void grant(int client, const std::string &user, uid_t uid, pid_t pid, const std::string &method, bool needsPassword)
     {
-        const std::string temporary = std::string(failuresPath) + ".new";
-        std::ofstream(temporary) << m_failures.save();
-        std::rename(temporary.c_str(), failuresPath);
+        const Config config;
+        if ((method != "face" && method != "fingerprint") || !config.boolean("polkit/" + method, false)) {
+            return reply(client, Aborted);
+        }
+        // As for sudo: the camera and the reader answer for whoever is at this computer.
+        if (config.boolean("core/abort_if_ssh", true) && !peerAtComputer(pid, uid)) {
+            return reply(client, Aborted);
+        }
+        int code = Aborted;
+        if (method == "fingerprint") {
+            code = verifyFinger(client, user, uid);
+        } else if (config.boolean("core/disabled", false)) {
+            code = Aborted;
+        } else if (needsPassword) {
+            code = NeedsPassword;
+        } else if (const int model = hasModel(user, uid); model != Recognized) {
+            code = model;
+        } else {
+            code = compareFace(client, user, uid);
+        }
+        if (code != Recognized) {
+            return reply(client, code);
+        }
+        std::string token;
+        {
+            const std::lock_guard lock(m_state);
+            token = m_grants.issue(uid, GrantStore::Clock::now());
+        }
+        if (token.empty()) {
+            return reply(client, Error);
+        }
+        sendLine(client, std::to_string(Recognized) + ' ' + token);
+    }
+
+    // Captures a face here, in the sandbox, so OpenCV never handles camera frames as root.
+    int enrollFace(int client, const std::string &user, const std::string &label)
+    {
+        const auto hungUp = [client] {
+            return clientHungUp(client);
+        };
+        const std::optional<TurnQueue::Turn> turn = m_camera.take(0, hungUp);
+        if (!turn) {
+            return Aborted;
+        }
+        constexpr std::size_t manyModels = 3;
+        std::vector<FaceModel> models = loadModels(user);
+        if (models.size() > manyModels) {
+            say(client, "NOTICE: Each additional model slows down the face recognition engine slightly");
+        }
+        const int nextId = models.empty() ? 0 : models.back().id + 1;
+        FaceModel model{nextId, faceLabel(label, nextId), std::time(nullptr), {}};
+        try {
+            const ScanResult result = enroll(
+                Config(),
+                model.encodings,
+                [client](const std::string &line) {
+                    say(client, line);
+                },
+                hungUp);
+            if (result.code != Recognized) {
+                say(client, result.message);
+                if (result.code != Aborted) {
+                    std::cerr << "kenning daemon: enrolment for " << user << ": " << result.message << std::endl;
+                }
+                return result.code == NoCamera ? NoCamera : Error;
+            }
+        } catch (const std::exception &error) {
+            std::cerr << "kenning daemon: enrolment failed: " << error.what() << std::endl;
+            say(client, "Face recognition failed to start");
+            return Error;
+        }
+        models.push_back(model);
+        if (!saveModels(user, models)) {
+            say(client, "Could not save the face model");
+            return Error;
+        }
+        say(client, "Face model saved as \"" + model.label + "\" (ID " + std::to_string(nextId) + ")");
+        return Recognized;
+    }
+
+    bool isLockedOut(uid_t uid, const FailureLimits &limits)
+    {
+        const std::lock_guard lock(m_state);
+        return m_failures.limiter.isLockedOut(uid, limits, FailureLimiter::Clock::now());
+    }
+
+    int hasFingerprint(const std::string &user, uid_t uid)
+    {
+        std::string message;
+        const ExitCode code = enrolledFingerprints(user, message);
+        const std::lock_guard lock(m_state);
+        if (code == Recognized && m_fingerprintFailures.limiter.isLockedOut(uid, FailureLimits::fromConfig(Config()), FailureLimiter::Clock::now())) {
+            return LockedOut;
+        }
+        return code;
+    }
+
+    // Asks fprintd for the user's finger, telling the client what to do as the reader asks.
+    int verifyFinger(int client, const std::string &user, uid_t uid)
+    {
+        const Config config;
+        // Unrecognized fingers alone lock the reader: wrong passwords count for the face only.
+        FailureLimits limits = FailureLimits::fromConfig(config);
+        limits.maxPasswordFailures = 0;
+        const auto lockedOut = [&] {
+            const std::lock_guard lock(m_state);
+            return m_fingerprintFailures.limiter.isLockedOut(uid, limits, FailureLimiter::Clock::now());
+        };
+        if (lockedOut()) {
+            say(client, "Too many fingerprint attempts; use your password", MessageKind::Error);
+            return LockedOut;
+        }
+        const auto hungUp = [client] {
+            return clientHungUp(client);
+        };
+        constexpr auto patience = std::chrono::seconds(1);
+        const std::optional<TurnQueue::Turn> turn = m_reader.take(uid, hungUp, patience);
+        if (!turn) {
+            say(client, "The fingerprint reader is in use", MessageKind::Error);
+            return Aborted;
+        }
+        if (lockedOut()) {
+            say(client, "Too many fingerprint attempts; use your password", MessageKind::Error);
+            return LockedOut;
+        }
+        const FingerprintOptions options{
+            .timeout = std::chrono::seconds(std::max(1, int(config.number("fingerprint/timeout", 30)))),
+            .maxTries = std::max(1, int(config.number("fingerprint/max_tries", 3))),
+        };
+        std::string message;
+        const ExitCode code =
+            verifyFingerprint(user,
+                              options,
+                              {
+                                  .say =
+                                      [client](const std::string &text) {
+                                          say(client, text);
+                                      },
+                                  .cancelled = hungUp,
+                                  .noMatch =
+                                      [&] {
+                                          return !recordFailure(m_fingerprintFailures, user, uid, FailureLimiter::Kind::Face, limits, "fingers");
+                                      },
+                              },
+                              message);
+        if (code == Recognized) {
+            recordSuccess(m_fingerprintFailures, uid);
+        } else if (!message.empty() && code != Aborted) {
+            say(client, message, MessageKind::Error);
+        }
+        return code;
+    }
+
+    void recordSuccess(KeptLimiter &failures, uid_t uid)
+    {
+        const std::lock_guard lock(m_state);
+        failures.limiter.recordSuccess(uid);
+        failures.save();
+    }
+
+    // Returns true when this failure locked the user out.
+    bool recordFailure(KeptLimiter &failures, const std::string &user, uid_t uid, FailureLimiter::Kind kind, const FailureLimits &limits, const char *what)
+    {
+        const std::lock_guard lock(m_state);
+        const bool lockedOut = failures.limiter.recordFailure(uid, kind, limits, FailureLimiter::Clock::now());
+        if (lockedOut) {
+            std::cerr << "kenning daemon: unlocking with " << what << " locked for " << user << " for " << limits.lockout.count() << " minutes after "
+                      << limits.maxFailures << " unrecognized " << what;
+            if (limits.maxPasswordFailures > 0) {
+                std::cerr << " and " << limits.maxPasswordFailures << " wrong passwords";
+            }
+            std::cerr << "\n";
+        }
+        failures.save();
+        return lockedOut;
     }
 
     void recordResult(const std::string &user, uid_t uid, const ScanResult &result, const FailureLimits &limits)
     {
         if (result.code == Recognized) {
-            m_failures.recordSuccess(uid);
-            saveFailures();
-            return;
-        }
-        // A face that was seen and not recognized counts, however the scan ended: a client
-        // that hangs up just before the timeout must not get unlimited tries.
-        if (result.stats.faceFrames > 0) {
-            recordFailure(user, uid, FailureLimiter::Kind::Face, limits);
+            recordSuccess(m_failures, uid);
+        } else if (result.stats.faceFrames > 0) {
+            // A face that was seen and not recognized counts, however the scan ended: a client
+            // that hangs up just before the timeout must not get unlimited tries.
+            recordFailure(m_failures, user, uid, FailureLimiter::Kind::Face, limits, "faces");
         }
     }
 
-    void recordFailure(const std::string &user, uid_t uid, FailureLimiter::Kind kind, const FailureLimits &limits)
-    {
-        if (m_failures.recordFailure(uid, kind, limits, FailureLimiter::Clock::now())) {
-            std::cerr << "kenning daemon: face unlock locked for " << user << " for " << limits.lockout.count() << " minutes after " << limits.maxFailures
-                      << " unrecognized faces and " << limits.maxPasswordFailures << " wrong passwords\n";
-        }
-        saveFailures();
-    }
-
-    FailureLimiter m_failures;
+    // Guards the limiters, m_signedIn and m_grants: each connection is served in a thread of its own.
+    std::mutex m_state;
+    KeptLimiter m_failures{failuresPath};
+    KeptLimiter m_fingerprintFailures{fingerprintFailuresPath};
     SignedInUsers m_signedIn;
+    GrantStore m_grants;
+    TurnQueue m_camera;
+    TurnQueue m_reader;
 };
 }
 
@@ -360,50 +642,63 @@ int runDaemon()
         return Error;
     }
 
+    // OpenCV waits this many seconds for a frame (10 unless set): a camera that stops delivering
+    // must not hold a scan, and everyone queued behind it, for long past video/timeout.
+    setenv("OPENCV_VIDEOIO_V4L_SELECT_TIMEOUT", "3", 0);
+
     Service service;
-    PendingClients pending;
-    auto idleSince = Clock::now();
+    Arrivals arriving;
+    std::atomic<int> connections = 0;
     for (;;) {
-        std::vector<pollfd> waiting{{listener, POLLIN, 0}};
-        for (const PendingClient &client : pending.clients()) {
-            waiting.push_back({client.fd, POLLIN, 0});
+        pollfd waiting{listener, POLLIN, 0};
+        const int ready = poll(&waiting, 1, activated ? idleExitMs : -1);
+        if (ready == 0) {
+            if (connections == 0 && service.canExit()) {
+                return 0;
+            }
+            continue;
         }
-        int timeoutMs = -1;
-        if (!pending.clients().empty()) {
-            timeoutMs = pending.millisecondsUntilNextDeadline(Clock::now());
-        } else if (activated) {
-            timeoutMs = int(std::max<long long>(0, idleExitMs - std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - idleSince).count()));
-        }
-        const int ready = poll(waiting.data(), waiting.size(), timeoutMs);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
             }
             return Error;
         }
-        const auto now = Clock::now();
-        if (ready == 0 && pending.clients().empty()) {
-            if (service.canExit()) {
-                return 0;
-            }
-            idleSince = now;
+        const int client = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+        if (client < 0) {
             continue;
         }
-
-        for (std::size_t i = 1; i < waiting.size(); ++i) {
-            if (waiting[i].revents) {
-                pending.read(waiting[i].fd);
+        const auto deadline = Clock::now() + requestDeadline;
+        ucred peer{};
+        socklen_t peerSize = sizeof(peer);
+        if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peerSize) != 0 || !arriving.enter(peer.uid)) {
+            close(client);
+            continue;
+        }
+        // A scan takes seconds; questions such as has-model must not wait for it.
+        if (++connections > maxConnections) {
+            --connections;
+            arriving.leave(peer.uid);
+            reply(client, Aborted);
+            close(client);
+            continue;
+        }
+        std::thread([&service, &arriving, &connections, client, peer, deadline] {
+            const std::optional<Request> request = receiveRequest(client, deadline);
+            arriving.leave(peer.uid);
+            // Nothing a request does may end the service for everyone else.
+            try {
+                service.serve(client, peer, request);
+            } catch (const std::exception &error) {
+                std::cerr << "kenning daemon: request failed: " << error.what() << std::endl;
+                reply(client, Error);
+            } catch (...) {
+                std::cerr << "kenning daemon: request failed" << std::endl;
+                reply(client, Error);
             }
-        }
-        // Whole requests, then ones out of time (answered "aborted"), oldest first.
-        for (PendingClient &client : pending.takeFinished(now)) {
-            service.serve(client.fd, client.peer, client.complete ? parseRequest(client.buffer) : std::nullopt);
-            close(client.fd);
-        }
-        if (waiting[0].revents & POLLIN) {
-            pending.accept(listener, now);
-        }
-        idleSince = Clock::now();
+            close(client);
+            --connections;
+        }).detach();
     }
 }
 }

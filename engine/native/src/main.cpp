@@ -52,42 +52,30 @@ int requireRoot()
     return 0;
 }
 
-int add(const std::string &user, std::string label, bool plain)
+int add(const std::string &user, const std::string &label, bool plain)
 {
     if (const int error = requireRoot()) {
         return error;
     }
-    constexpr std::size_t manyModels = 3;
-    std::vector<FaceModel> models = loadModels(user);
-    if (models.size() > manyModels) {
-        std::cout << "NOTICE: Each additional model slows down the face recognition engine slightly\n";
-    }
-    const int nextId = models.empty() ? 0 : models.back().id + 1;
-    std::erase(label, ',');
-    if (label.empty()) {
-        label = "Model #" + std::to_string(nextId);
-    }
-    label = label.substr(0, std::size_t(maxLabelLength));
     if (!plain) {
         std::cout << "Adding face model for the user " << user << '\n';
     }
-
-    FaceModel model{nextId, label, std::time(nullptr), {}};
-    const ScanResult result = enroll(Config(), model.encodings, [](const std::string &line) {
-        std::cout << line << std::endl;
-    });
-    if (result.code != Recognized) {
-        std::cout << result.message << std::endl;
+    // The service captures the face in its sandbox, so OpenCV doesn't run as root here.
+    constexpr int enrolmentLineTimeoutSeconds = 30;
+    const Reply reply = callService({.command = "enroll",
+                                     .user = user,
+                                     .argument = label,
+                                     .idleTimeoutSeconds = enrolmentLineTimeoutSeconds,
+                                     .onMessage =
+                                         [](MessageKind, const std::string &line) {
+                                             std::cout << line << std::endl;
+                                         },
+                                     .cancelled = {}});
+    if (reply.code < 0) {
+        std::cout << "The Kenning service isn't reachable at " << socketPath << std::endl;
         return Error;
     }
-
-    models.push_back(model);
-    if (!saveModels(user, models)) {
-        std::cout << "Could not save the face model" << std::endl;
-        return Error;
-    }
-    std::cout << "Face model saved as \"" << label << "\" (ID " << nextId << ")" << std::endl;
-    return 0;
+    return reply.code;
 }
 
 int remove(const std::string &user, const std::string &idText)
@@ -121,11 +109,13 @@ int list(const std::string &user, bool plain)
     // Face models belong to the service user; others can only ask whether there are any.
     if (geteuid() != 0) {
         const int code = askService("has-model", user, quickTimeoutSeconds);
-        if (code == Recognized || code == LockedOut) {
+        if (code == Recognized || code == LockedOut || code == NoCamera) {
             if (!plain) {
                 std::cout << "Face recognition is set up for " << user << ". To see the face models, run:\n\n\tsudo kenning list\n";
                 if (code == LockedOut) {
                     std::cout << "\nFace unlock is paused for a few minutes after too many faces that weren't recognized.\n";
+                } else if (code == NoCamera) {
+                    std::cout << "\nThe camera isn't available: it is switched off, unplugged, or none is set up.\n";
                 }
             }
             return 0;
@@ -179,6 +169,12 @@ int testAsUser(const Config &config, const std::string &user)
         break;
     case LockedOut:
         std::cout << "Failure, too many attempts; face unlock is locked for a few minutes\n";
+        break;
+    case NoCamera:
+        std::cout << "Failure, camera not available (switched off, unplugged, in use, or none set up)\n";
+        break;
+    case NeedsPassword:
+        std::cout << "Failure, sign in with your password once after a restart\n";
         break;
     case -1:
         std::cout << "Failure, the Kenning service isn't reachable at " << socketPath << '\n';

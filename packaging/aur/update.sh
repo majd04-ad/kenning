@@ -40,6 +40,13 @@ pkgver() {
 prepare() {""")
         once("package_kenning() {", "package_kenning-git() {\n  provides=(\"kenning=${pkgver%%.r*}\")")
         once("  conflicts=(plasma-faceunlock)", "  conflicts=(kenning plasma-faceunlock)")
+        # The hooks name the package they belong to: without this, upgrading kenning-git wouldn't
+        # redo the lock screen add-on, and removing it wouldn't put the stock lock screen back.
+        once('  install -Dm644 -t "$pkgdir/usr/share/libalpm/hooks" "$startdir"/packaging/arch/*.hook\n',
+             '  local hook\n'
+             '  for hook in "$startdir"/packaging/arch/*.hook; do\n'
+             '    sed "s/^Target = kenning$/Target = kenning-git/" "$hook" | install -Dm644 /dev/stdin "$pkgdir/usr/share/libalpm/hooks/${hook##*/}"\n'
+             '  done\n')
         once("package_plasma-login-manager-kenning() {", "package_plasma-login-manager-kenning-git() {")
         once('  provides=("plasma-login-manager=$_plmver")', '  provides=("plasma-login-manager=$_plmver" "plasma-login-manager-kenning=${pkgver%%.r*}")')
         once("  conflicts=(plasma-login-manager plasma-login-manager-faceunlock)",

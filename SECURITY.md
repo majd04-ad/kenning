@@ -25,7 +25,9 @@ Examples of what to report:
 - signing in, unlocking or approving as someone without their face or password
 - reading or replacing someone's face models
 - a way to make Kenning's service or its root helper run something for another user
-- getting around the rate limit on failed attempts
+- getting around the rate limit on failed attempts, for faces or fingerprints
+- getting, guessing or reusing the token Kenning's polkit dialog uses for a finger or face, or approving an administrator prompt with it without that finger or face
+- making the lock screen or the login screen read a finger the user didn't choose to use
 
 These are known limits, which the README describes, rather than vulnerabilities:
 

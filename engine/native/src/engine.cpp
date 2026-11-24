@@ -13,7 +13,9 @@ namespace FaceUnlock
 {
 namespace
 {
+// Howdy's words; the camera is switched off, unplugged, in use by another program, or none is set up.
 const char *const cameraFailure = "Failure, not possible to open camera at configured path";
+const char *const noFramesFailure = "Failure, the camera gave no frames";
 
 bool hasEncodings(const std::vector<FaceModel> &models)
 {
@@ -64,7 +66,7 @@ ScanResult compare(const Config &config, const std::string &user, const std::fun
     const auto scanStart = Clock::now();
     Pipeline pipeline(config);
     if (!pipeline.ready()) {
-        return {.code = Error, .message = cameraFailure};
+        return {.code = NoCamera, .message = cameraFailure};
     }
 
     ScanStats stats{.cameraMs = pipeline.cameraMs(), .networksMs = pipeline.networksMs()};
@@ -115,8 +117,12 @@ ScanResult compare(const Config &config, const std::string &user, const std::fun
         }
     }
 
+    // Opened, but it never delivered: another program is streaming from it, or it went away.
+    if (stats.frames == 0) {
+        return {.code = NoCamera, .bestScore = best, .message = noFramesFailure, .stats = stats};
+    }
     const int litFrames = stats.frames - blackFrames;
-    if (stats.faceFrames == 0 && stats.frames > 0) {
+    if (stats.faceFrames == 0) {
         if (const auto failure = lightingFailure(stats.darkFrames, stats.brightFrames, litFrames, pipeline.colour())) {
             const char *message = *failure == TooBright ? "Failure, image too bright" : "Failure, image too dark";
             stats.darkFrames += blackFrames;
@@ -214,10 +220,11 @@ std::string skippedMessage(const StepProgress &progress)
 class Enrolment
 {
 public:
-    Enrolment(Pipeline &pipeline, std::vector<cv::Mat> &encodings, const ProgressCallback &progress)
+    Enrolment(Pipeline &pipeline, std::vector<cv::Mat> &encodings, const ProgressCallback &progress, const std::function<bool()> &cancelled)
         : m_pipeline(pipeline)
         , m_encodings(encodings)
         , m_progress(progress)
+        , m_cancelled(cancelled)
     {
     }
 
@@ -228,9 +235,17 @@ public:
         const auto deadline = Clock::now() + budget.timeLimit;
         StepProgress progress;
         while (progress.captured < budget.wanted && Clock::now() < deadline && !outOfFrames(step)) {
+            if (m_cancelled && m_cancelled()) {
+                m_encodings.clear();
+                return ScanResult{.code = Aborted, .message = "Failure, cancelled"};
+            }
             cv::Mat image;
             const Pipeline::Frame frame = m_pipeline.read(image);
-            if (frame == Pipeline::Frame::Missing || frame == Pipeline::Frame::Black) {
+            if (frame == Pipeline::Frame::Missing) {
+                continue;
+            }
+            ++m_frames;
+            if (frame == Pipeline::Frame::Black) {
                 continue;
             }
             ++m_litFrames;
@@ -260,6 +275,9 @@ public:
         if (!m_encodings.empty()) {
             m_progress("Scan complete");
             return {.code = Recognized, .bestScore = 0, .message = "Scan complete"};
+        }
+        if (m_frames == 0) {
+            return {.code = NoCamera, .message = noFramesFailure};
         }
         if (m_litFrames == 0) {
             return {.code = Aborted,
@@ -343,6 +361,8 @@ private:
     Pipeline &m_pipeline;
     std::vector<cv::Mat> &m_encodings;
     const ProgressCallback &m_progress;
+    const std::function<bool()> &m_cancelled;
+    int m_frames = 0; // including black ones
     int m_litFrames = 0;
     int m_darkFrames = 0;
     int m_brightFrames = 0;
@@ -351,13 +371,13 @@ private:
 };
 }
 
-ScanResult enroll(const Config &config, std::vector<cv::Mat> &encodings, const ProgressCallback &progress)
+ScanResult enroll(const Config &config, std::vector<cv::Mat> &encodings, const ProgressCallback &progress, const std::function<bool()> &cancelled)
 {
     Pipeline pipeline(config);
     if (!pipeline.ready()) {
-        return {.code = Error, .message = cameraFailure};
+        return {.code = NoCamera, .message = cameraFailure};
     }
-    Enrolment enrolment(pipeline, encodings, progress);
+    Enrolment enrolment(pipeline, encodings, progress, cancelled);
     for (const EnrolmentStep &step : enrolmentSteps) {
         if (step.kind != StepKind::LookStraight && encodings.empty()) {
             break;

@@ -8,13 +8,15 @@ import QtQuick.Layouts
 
 import org.kde.kirigami as Kirigami
 
-// Face unlock progress for the login screen, the lock screen and the settings page; themes: see THEMES.md.
+// Face and fingerprint progress for the login screen, the lock screen, the polkit dialog and the settings page; themes: see THEMES.md.
 Item {
     id: root
 
     // 0 idle (hidden), 1 scanning, 2 recognized, 3 failed
     property int faceState: 0
     property string message
+    // "face" or "fingerprint": themes that know it draw a finger instead of a face
+    property string method: "face"
     property string style: "hello"
     property var themeDirs: ["file:///usr/local/share/kenning/themes/", "file:///usr/share/kenning/themes/"]
 
@@ -34,8 +36,8 @@ Item {
     }
 
     Layout.fillWidth: true
-    implicitWidth: loader.item ? loader.item.implicitWidth : 0
-    implicitHeight: active && loader.item ? loader.item.implicitHeight : 0
+    implicitWidth: loader.item ? loader.item.implicitWidth : plainMessage.implicitWidth
+    implicitHeight: !active ? 0 : loader.item ? loader.item.implicitHeight : themeMissing ? plainMessage.implicitHeight : 0
     opacity: active ? 1 : 0
     clip: true
 
@@ -51,20 +53,61 @@ Item {
         }
     }
 
+    // Where the theme may be, in the order tried: each directory, then the built-in theme.
+    readonly property var candidates: themeDirs.map(dir => dir + themeId + "/contents/ui/main.qml")
+        .concat(themeId === "hello" ? [] : [themeDirs[themeDirs.length - 1] + "hello/contents/ui/main.qml"])
+    // Candidates before this one are skipped: they failed to create an item.
     property int attempt: 0
     onThemeIdChanged: attempt = 0
+
+    // The first candidate from `from` on that compiles, as {component, index}, or null.
+    // Qt.createComponent rather than Loader.source: a Loader logs "No such file or
+    // directory" for every place that has no such theme, which is the usual case for
+    // /usr/local. Only a file that is there but broken is worth a warning; its error,
+    // unlike a missing file's, carries a line number.
+    function findTheme(list, from) {
+        for (let i = from; i < list.length; i++) {
+            const component = Qt.createComponent(list[i]);
+            if (component.status === Component.Ready) {
+                return {component: component, index: i};
+            }
+            if (/\.qml:\d+/.test(component.errorString())) {
+                console.warn(component.errorString().trim());
+            }
+        }
+        return null;
+    }
+    readonly property var theme: findTheme(candidates, attempt)
+    // Neither the chosen theme nor the built-in one could be loaded.
+    readonly property bool themeMissing: theme === null
 
     Loader {
         id: loader
         anchors.horizontalCenter: parent.horizontalCenter
-        source: root.attempt < root.themeDirs.length
-            ? root.themeDirs[root.attempt] + root.themeId + "/contents/ui/main.qml"
-            : root.themeDirs[root.themeDirs.length - 1] + "hello/contents/ui/main.qml"
+        sourceComponent: root.theme ? root.theme.component : null
+        // Compiled but failed to create its item: on to the next place.
         onStatusChanged: {
-            if (status === Loader.Error && root.attempt < root.themeDirs.length) {
-                root.attempt++;
+            if (status === Loader.Error && root.theme) {
+                root.attempt = root.theme.index + 1;
             }
         }
+    }
+
+    // No theme could be loaded, not even the built-in one (a broken install): the message alone,
+    // so a scan is never silent.
+    Text {
+        id: plainMessage
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: Math.min(implicitWidth, root.width)
+        visible: root.themeMissing
+        text: root.message
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        horizontalAlignment: Text.AlignHCenter
+        font: Kirigami.Theme.defaultFont
+        color: root.faceState === 2 ? Kirigami.Theme.positiveTextColor : root.faceState === 3 ? Kirigami.Theme.negativeTextColor : root.textColor
+        topPadding: Kirigami.Units.smallSpacing
+        bottomPadding: Kirigami.Units.smallSpacing
     }
 
     Binding {
@@ -78,6 +121,12 @@ Item {
         when: loader.status === Loader.Ready
         property: "message"
         value: root.message
+    }
+    Binding {
+        target: loader.item
+        when: loader.status === Loader.Ready && "method" in loader.item
+        property: "method"
+        value: root.method
     }
     Binding {
         target: loader.item

@@ -18,6 +18,8 @@ DeviceAllow=char-video4linux rw
 CapabilityBoundingSet=
 NoNewPrivileges=yes
 ProtectSystem=strict
+# Set Up saves face models here; nothing else on the system is writable
+ReadWritePaths=-@KENNING_SYSCONFDIR@/models
 ProtectHome=yes
 PrivateTmp=yes
 PrivateNetwork=yes
