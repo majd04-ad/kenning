@@ -144,8 +144,14 @@ bool hasLocalSession(uid_t uid)
     return local;
 }
 
+// What answers for whoever is at this computer.
+enum class Sensor {
+    Camera, // approves whoever looks at it
+    Reader, // needs a finger put on it, on purpose
+};
+
 // True when the person asking may not be at this computer: logind decides, the environment can only add a refusal.
-bool remoteSession(pam_handle_t *pamh, const Config &config)
+bool remoteSession(pam_handle_t *pamh, const Config &config, Sensor sensor)
 {
     const void *rhost = nullptr;
     if (pam_get_item(pamh, PAM_RHOST, &rhost) == PAM_SUCCESS && rhost && *static_cast<const char *>(rhost)
@@ -169,8 +175,10 @@ bool remoteSession(pam_handle_t *pamh, const Config &config)
     // A setuid program raising the user to root: sudo or su from a Plasma 6 terminal, or
     // polkit's helper. Any program of this user can run outside a session, including one
     // started over SSH with systemd-run --user, so whoever sits at the camera would approve
-    // it: only when allowed. The lock screen runs as the user and isn't affected.
-    if (geteuid() == 0 && !config.boolean("core/allow_outside_session", false)) {
+    // it: only when allowed. The lock screen runs as the user and isn't affected. A finger
+    // is: the person at the computer would have to touch the reader for a request they
+    // can't see, as the request for a finger shows where the program runs.
+    if (sensor == Sensor::Camera && geteuid() == 0 && !config.boolean("core/allow_outside_session", false)) {
         return true;
     }
     // On Plasma 6 the lock screen and apps run under the user's service manager: only for a
@@ -267,7 +275,7 @@ int authenticateFace(pam_handle_t *pamh, const Config &config)
     }
     // Whatever happens to the face, a password may follow.
     watchPassword(pamh);
-    if (config.boolean("core/abort_if_ssh", true) && remoteSession(pamh, config)) {
+    if (config.boolean("core/abort_if_ssh", true) && remoteSession(pamh, config, Sensor::Camera)) {
         return PAM_AUTHINFO_UNAVAIL;
     }
     waitUntilAwake();
@@ -421,7 +429,7 @@ int authenticateFingerprint(pam_handle_t *pamh, const Config &config, Fingerprin
     // Whatever happens to the finger, a password may follow.
     watchPassword(pamh);
     // fprintd reads whoever touches the reader here, as the camera sees whoever sits here.
-    if (config.boolean("core/abort_if_ssh", true) && remoteSession(pamh, config)) {
+    if (config.boolean("core/abort_if_ssh", true) && remoteSession(pamh, config, Sensor::Reader)) {
         return PAM_AUTHINFO_UNAVAIL;
     }
     const char *user = nullptr;

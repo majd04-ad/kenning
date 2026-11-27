@@ -193,7 +193,10 @@ The module refuses (`abort_if_ssh`, on by default) when:
 - logind says the caller's session is remote, or can't tell;
 - the caller is outside any session (as programs started by the user's service manager
   are on Plasma 6), isn't root, and either is setuid root (`sudo`, `su`, polkit's helper:
-  refused unless `allow_outside_session` is on) or its user has no active, local session.
+  refused for the face unless `allow_outside_session` is on) or its user has no active,
+  local session. A finger isn't refused for being outside a session: the person at the
+  computer would have to touch the reader for a request they can't see, as the request for
+  a finger shows where the program runs.
 
 Any program of the user can run outside a session, including one started over SSH with
 `systemd-run --user`, so outside a session nothing says who asked. Refusing only programs
@@ -263,8 +266,9 @@ These are where review would help most.
   does for root or the user's own account.
 - **Signed in at the computer and over SSH at once:** a program started from the SSH
   login outside any session still passes the "at the computer" rule for the lock screen,
-  which only unlocks a session the SSH login can use already. `sudo` and administrator
-  prompts are refused there unless `allow_outside_session` is on.
+  which only unlocks a session the SSH login can use already. Face unlock for `sudo` and
+  administrator prompts is refused there unless `allow_outside_session` is on; a finger
+  isn't, but has to be put on the reader by someone at the computer.
 - **The world-writable socket** relies entirely on the kernel's peer credentials and
   the service's request parsing.
 - **Automatic login** counts as signing in after a restart.
