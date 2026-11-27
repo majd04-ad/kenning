@@ -149,7 +149,7 @@ KCM.SimpleKCM {
                 onToggled: kcm.setValue("core/allow_outside_session", !checked)
             }
             Kirigami.ContextualHelpButton {
-                toolTipText: i18n("On Plasma 6, terminals such as Konsole run outside a sign-in session, so with this checked sudo there asks for your password. Kenning can't tell them apart from a program started over SSH. The lock screen isn't affected.")
+                toolTipText: i18n("On Plasma 6, terminals such as Konsole run outside a sign-in session, so with this checked sudo there doesn't use your face. Kenning can't tell them apart from a program started over SSH. The lock screen and fingerprints aren't affected: a finger has to be put on the reader on purpose.")
             }
         }
         RowLayout {
